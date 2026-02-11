@@ -1,14 +1,14 @@
-import sqlite3
 import datetime
 import random
 import time
 from typing import Dict, List, Tuple, Optional, Union
+from db import db_tool
 
-# 导入公共数据库工具
-from .db import db_tool
-
-# 导入公共缓存模块
-from .cache import cache_manager
+INTEREST_RATE_DAILY_MIN = 0.00005
+INTEREST_RATE_DAILY_MAX = 0.00030
+INTEREST_EVENT_PROB = 0.04
+INTEREST_EVENT_RATE_MIN = -0.002
+INTEREST_EVENT_RATE_MAX = 0.005
 
 # 状态常量
 STATUS_FREE = 0      # 自由状态
@@ -51,7 +51,7 @@ def init_bank_db():
         UNIQUE(uid, belonging_group)
     )
     """
-    db_tool.execute_update(sql)
+    db_tool.execute_script(sql)
     
     # 创建用户状态表
     sql = """
@@ -64,79 +64,195 @@ def init_bank_db():
         UNIQUE(uid, belonging_group)
     )
     """
-    db_tool.execute_update(sql)
+    db_tool.execute_script(sql)
 
-# 初始化数据库
-init_bank_db()
+    sql = """
+    CREATE TABLE IF NOT EXISTS bank_interest_rates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        belonging_group INTEGER NOT NULL,
+        date TEXT NOT NULL,
+        rate REAL NOT NULL,
+        event TEXT,
+        UNIQUE(belonging_group, date)
+    )
+    """
+    db_tool.execute_script(sql)
+
+    sql = """
+    CREATE TABLE IF NOT EXISTS bank_interest_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uid INTEGER NOT NULL,
+        belonging_group INTEGER NOT NULL,
+        date TEXT NOT NULL,
+        rate REAL NOT NULL,
+        interest REAL NOT NULL,
+        balance_before REAL NOT NULL,
+        balance_after REAL NOT NULL
+    )
+    """
+    db_tool.execute_script(sql)
+
+    # 检查并添加 last_interest_date 列
+    sql = "PRAGMA table_info(bank_accounts)"
+    existing_columns = {row[1] for row in db_tool.execute_query(sql)}
+    if "last_interest_date" not in existing_columns:
+        db_tool.execute_script("ALTER TABLE bank_accounts ADD COLUMN last_interest_date TEXT")
+
+
+def _clamp(value: float, min_value: float, max_value: float) -> float:
+    return max(min_value, min(max_value, value))
+
+
+def _generate_daily_interest_rate() -> Tuple[float, Optional[str]]:
+    base_rate = random.uniform(INTEREST_RATE_DAILY_MIN, INTEREST_RATE_DAILY_MAX)
+    if random.random() >= INTEREST_EVENT_PROB:
+        return base_rate, None
+
+    event_type = random.choice(
+        [
+            "央行紧急加息",
+            "央行紧急降息",
+            "金融危机冲击",
+            "银行存款大战",
+            "流动性泛滥",
+            "银行挤兑现象",
+        ]
+    )
+    rate = base_rate
+
+    if event_type == "央行紧急加息":
+        rate = base_rate + random.uniform(0.0003, 0.0025)
+    elif event_type == "央行紧急降息":
+        rate = base_rate - random.uniform(0.0003, 0.0015)
+    elif event_type == "金融危机冲击":
+        rate = -random.uniform(0.0002, 0.0012)
+    elif event_type == "银行存款大战":
+        rate = base_rate * random.uniform(5, 15)
+    elif event_type == "流动性泛滥":
+        rate = base_rate + random.uniform(0.0005, 0.0035)
+    elif event_type == "银行挤兑现象":
+        rate = base_rate - random.uniform(0.0005, 0.0025)
+
+    rate = _clamp(rate, INTEREST_EVENT_RATE_MIN, INTEREST_EVENT_RATE_MAX)
+    return rate, event_type
+
+
+
+
+
+def get_interest_rate_info(group_id: int, date: Optional[datetime.date] = None) -> Tuple[float, Optional[str]]:
+    init_bank_db()
+    if date is None:
+        date = datetime.date.today()
+    date_str = date.isoformat()
+    
+    # 检查是否已有今日利率
+    sql = "SELECT rate, event FROM bank_interest_rates WHERE belonging_group=? AND date=?"
+    result = db_tool.execute_one(sql, (group_id, date_str))
+    if result is not None:
+        return float(result[0]), result[1]
+    
+    # 生成新利率
+    rate, event = _generate_daily_interest_rate()
+    sql = "INSERT INTO bank_interest_rates (belonging_group, date, rate, event) VALUES (?, ?, ?, ?)"
+    db_tool.execute_update(sql, (group_id, date_str, rate, event))
+    return rate, event
+
+
+def _ensure_bank_account(group_id: int, user_id: int) -> Tuple[float, Optional[str]]:
+    sql = "SELECT balance, last_interest_date FROM bank_accounts WHERE uid=? AND belonging_group=?"
+    row = db_tool.execute_one(sql, (user_id, group_id))
+    if row is None:
+        today_str = datetime.date.today().isoformat()
+        sql = "INSERT INTO bank_accounts (uid, belonging_group, balance, last_interest_date) VALUES (?, ?, ?, ?)"
+        db_tool.execute_update(sql, (user_id, group_id, 0.0, today_str))
+        return 0.0, today_str
+    return float(row[0]), row[1]
+
+
+def _apply_interest_if_needed(group_id: int, user_id: int) -> float:
+    balance, last_date_str = _ensure_bank_account(group_id, user_id)
+    today = datetime.date.today()
+    if not last_date_str:
+        last_date = today
+    else:
+        try:
+            last_date = datetime.date.fromisoformat(last_date_str)
+        except Exception:
+            last_date = today
+
+    if last_date >= today:
+        return 0.0
+
+    total_interest = 0.0
+    current_balance = balance
+    current_date = last_date
+    while current_date < today:
+        current_date = current_date + datetime.timedelta(days=1)
+        date_str = current_date.isoformat()
+        
+        # 获取当日利率
+        sql = "SELECT rate FROM bank_interest_rates WHERE belonging_group=? AND date=?"
+        result = db_tool.execute_one(sql, (group_id, date_str))
+        if result is None:
+            rate, _ = _generate_daily_interest_rate()
+            sql = "INSERT INTO bank_interest_rates (belonging_group, date, rate) VALUES (?, ?, ?)"
+            db_tool.execute_update(sql, (group_id, date_str, rate))
+        else:
+            rate = float(result[0])
+
+        interest = round(current_balance * rate, 2)
+        if interest != 0:
+            before = current_balance
+            after = round(current_balance + interest, 2)
+            sql = "INSERT INTO bank_interest_records (uid, belonging_group, date, rate, interest, balance_before, balance_after) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            db_tool.execute_update(sql, (user_id, group_id, date_str, rate, interest, before, after))
+            current_balance = after
+            total_interest = round(total_interest + interest, 2)
+        else:
+            current_balance = round(current_balance, 2)
+
+    sql = "UPDATE bank_accounts SET balance=?, last_interest_date=? WHERE uid=? AND belonging_group=?"
+    db_tool.execute_update(sql, (current_balance, today.isoformat(), user_id, group_id))
+    return total_interest
 
 def get_bank_balance(group_id: int, user_id: int) -> float:
     """获取用户银行余额"""
-    # 先检查缓存
-    cache_key = f"bank_balance_{group_id}_{user_id}"
-    cached_value = cache_manager.get_cached_value(cache_key)
-    if cached_value is not None:
-        return cached_value
+    init_bank_db()
     
-    # 从数据库获取
-    sql = f"SELECT balance FROM bank_accounts WHERE uid={user_id} AND belonging_group={group_id}"
-    result = db_tool.execute_one(sql)
+    # 应用利息
+    _apply_interest_if_needed(group_id, user_id)
     
-    if result is None:
-        # 创建新账户
-        sql = f"INSERT INTO bank_accounts (uid, belonging_group, balance) VALUES ({user_id}, {group_id}, 0)"
-        db_tool.execute_update(sql)
-        balance = 0.0
-    else:
-        balance = float(result[0])
-    
-    # 更新缓存
-    cache_manager.set_cached_value(cache_key, balance)
-    
+    # 获取余额
+    sql = "SELECT balance FROM bank_accounts WHERE uid=? AND belonging_group=?"
+    result = db_tool.execute_one(sql, (user_id, group_id))
+    balance = float(result[0]) if result else 0.0
     return balance
 
 def update_bank_balance(group_id: int, user_id: int, balance: float) -> None:
     """更新用户银行余额"""
-    # 检查用户是否有银行账户，如果没有则创建
-    sql = f"SELECT balance FROM bank_accounts WHERE uid={user_id} AND belonging_group={group_id}"
-    result = db_tool.execute_one(sql)
+    init_bank_db()
     
-    if result is None:
-        # 创建新账户
-        sql = f"INSERT INTO bank_accounts (uid, belonging_group, balance) VALUES ({user_id}, {group_id}, {balance})"
-    else:
-        # 更新余额
-        sql = f"UPDATE bank_accounts SET balance={balance} WHERE uid={user_id} AND belonging_group={group_id}"
+    # 应用利息
+    _apply_interest_if_needed(group_id, user_id)
     
-    db_tool.execute_update(sql)
-    
-    # 更新缓存
-    cache_key = f"bank_balance_{group_id}_{user_id}"
-    cache_manager.set_cached_value(cache_key, balance)
+    # 更新余额
+    balance = round(float(balance), 2)
+    sql = "UPDATE bank_accounts SET balance=? WHERE uid=? AND belonging_group=?"
+    db_tool.execute_update(sql, (balance, user_id, group_id))
 
 def get_user_status(group_id: int, user_id: int) -> Tuple[int, Optional[datetime.datetime]]:
     """获取用户状态和释放时间"""
-    # 先检查缓存
-    cache_key = f"user_status_{group_id}_{user_id}"
-    cached_value = cache_manager.get_cached_value(cache_key)
-    if cached_value is not None:
-        status, release_time = cached_value
-        # 检查是否已经过了释放时间
-        if release_time and datetime.datetime.now() > release_time:
-            # 自动释放
-            status = STATUS_FREE
-            release_time = None
-            # 更新缓存
-            cache_manager.set_cached_value(cache_key, (status, release_time))
-        return status, release_time
+    init_bank_db()
     
-    # 从数据库获取
-    sql = f"SELECT status, release_time FROM user_status WHERE uid={user_id} AND belonging_group={group_id}"
-    result = db_tool.execute_one(sql)
+    # 检查用户状态
+    sql = "SELECT status, release_time FROM user_status WHERE uid=? AND belonging_group=?"
+    result = db_tool.execute_one(sql, (user_id, group_id))
     
     if result is None:
         # 创建新状态记录
-        sql = f"INSERT INTO user_status (uid, belonging_group, status) VALUES ({user_id}, {group_id}, {STATUS_FREE})"
-        db_tool.execute_update(sql)
+        sql = "INSERT INTO user_status (uid, belonging_group, status) VALUES (?, ?, ?)"
+        db_tool.execute_update(sql, (user_id, group_id, STATUS_FREE))
         status = STATUS_FREE
         release_time = None
     else:
@@ -146,8 +262,8 @@ def get_user_status(group_id: int, user_id: int) -> Tuple[int, Optional[datetime
         # 检查是否已经过了释放时间
         if release_time and datetime.datetime.now() > release_time:
             # 自动释放（监狱、医院和通缉状态）
-            sql = f"UPDATE user_status SET status={STATUS_FREE}, release_time=NULL WHERE uid={user_id} AND belonging_group={group_id}"
-            db_tool.execute_update(sql)
+            sql = "UPDATE user_status SET status=?, release_time=NULL WHERE uid=? AND belonging_group=?"
+            db_tool.execute_update(sql, (STATUS_FREE, user_id, group_id))
             status = STATUS_FREE
             release_time = None
             
@@ -155,31 +271,24 @@ def get_user_status(group_id: int, user_id: int) -> Tuple[int, Optional[datetime
             if status == STATUS_WANTED and (group_id, user_id) in wanted_status:
                 del wanted_status[(group_id, user_id)]
     
-    # 更新缓存
-    cache_manager.set_cached_value(cache_key, (status, release_time))
-    
     return status, release_time
 
 def update_user_status(group_id: int, user_id: int, status: int, release_time: Optional[datetime.datetime] = None) -> None:
     """更新用户状态"""
-    # 检查用户是否有状态记录
-    sql = f"SELECT id FROM user_status WHERE uid={user_id} AND belonging_group={group_id}"
-    result = db_tool.execute_one(sql)
+    init_bank_db()
     
-    release_time_str = f"'{release_time.isoformat()}'" if release_time else "NULL"
+    # 检查用户是否有状态记录
+    sql = "SELECT id FROM user_status WHERE uid=? AND belonging_group=?"
+    result = db_tool.execute_one(sql, (user_id, group_id))
     
     if result is None:
         # 创建新状态记录
-        sql = f"INSERT INTO user_status (uid, belonging_group, status, release_time) VALUES ({user_id}, {group_id}, {status}, {release_time_str})"
+        sql = "INSERT INTO user_status (uid, belonging_group, status, release_time) VALUES (?, ?, ?, ?)"
+        db_tool.execute_update(sql, (user_id, group_id, status, release_time.isoformat() if release_time else None))
     else:
         # 更新状态
-        sql = f"UPDATE user_status SET status={status}, release_time={release_time_str} WHERE uid={user_id} AND belonging_group={group_id}"
-    
-    db_tool.execute_update(sql)
-    
-    # 更新缓存
-    cache_key = f"user_status_{group_id}_{user_id}"
-    cache_manager.set_cached_value(cache_key, (status, release_time))
+        sql = "UPDATE user_status SET status=?, release_time=? WHERE uid=? AND belonging_group=?"
+        db_tool.execute_update(sql, (status, release_time.isoformat() if release_time else None, user_id, group_id))
 
 def check_operation_allowed(group_id: int, user_id: int, allow_prison: bool = False, allow_hospital: bool = False, allow_wanted: bool = False) -> Tuple[bool, str]:
     """检查用户是否可以执行操作"""
@@ -201,21 +310,6 @@ def check_operation_allowed(group_id: int, user_id: int, allow_prison: bool = Fa
         return False, "你正处于通缉状态，无法执行此操作"
     
     return True, ""
-
-# 定期清理缓存的函数
-def clear_cache():
-    # 清理银行相关缓存
-    cache_manager.clear_cache("bank_balance_")
-    cache_manager.clear_cache("user_status_")
-
-# 导入定时器
-import asyncio
-
-# 定期清理缓存（每5分钟）
-async def schedule_cache_clear():
-    while True:
-        await asyncio.sleep(300)
-        clear_cache()
 
 def deposit(group_id: int, user_id: int, amount: float) -> str:
     """存款操作"""
@@ -313,8 +407,21 @@ def check_balance(group_id: int, user_id: int) -> str:
     active_coins = get_point(group_id, user_id)
     bank_balance = get_bank_balance(group_id, user_id)
     total_assets = active_coins + bank_balance
-    
-    return f"当前余额：\n活动金币：{active_coins:.2f}\n银行存款：{bank_balance:.2f}\n总资产：{total_assets:.2f}"
+
+    rate, event = get_interest_rate_info(group_id)
+    rate_text = f"{rate*100:.3f}%/天"
+    if event:
+        rate_text += f"（{event}）"
+
+    return f"当前余额：\n活动金币：{active_coins:.2f}\n银行存款：{bank_balance:.2f}\n总资产：{total_assets:.2f}\n今日利率：{rate_text}"
+
+
+def get_interest_rate_message(group_id: int) -> str:
+    rate, event = get_interest_rate_info(group_id)
+    rate_text = f"{rate*100:.3f}%/天"
+    if event:
+        rate_text += f"（{event}）"
+    return f"今日银行存款利率：{rate_text}"
 
 def rob_user(group_id: int, robber_id: int, victim_id: int) -> str:
     """抢劫用户"""
@@ -915,9 +1022,10 @@ def jail_break_all(group_id: int, user_id: int) -> str:
     # 50%概率劫狱成功
     if random.random() < 0.5:
         # 劫狱成功，释放所有在押人员
+        
         # 查询所有在押人员
-        sql = f"SELECT uid FROM user_status WHERE belonging_group={group_id} AND status={STATUS_PRISON}"
-        prisoners = db_tool.execute_query(sql)
+        sql = "SELECT uid FROM user_status WHERE belonging_group=? AND status=?"
+        prisoners = db_tool.execute_query(sql, (group_id, STATUS_PRISON))
         
         if not prisoners:
             return "当前没有人在监狱中，劫狱失败"
