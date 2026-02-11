@@ -289,76 +289,99 @@ def disband_alliance(group_id: int, leader_id: int) -> str:
     
     # 检查是否是联盟领袖
     is_leader = False
+    leader_cache_key = (group_id, leader_alliance)
+    
+    # 先检查内存中的领袖记录
     if group_id in alliance_leaders and leader_alliance in alliance_leaders[group_id]:
         if alliance_leaders[group_id][leader_alliance] == leader_id:
             is_leader = True
     
+    # 检查缓存
     if not is_leader:
-        # 从数据库中查询
+        with cache_lock:
+            if leader_cache_key in alliance_leader_cache:
+                cache_leader_id, timestamp = alliance_leader_cache[leader_cache_key]
+                if time.time() - timestamp < CACHE_EXPIRY and cache_leader_id == leader_id:
+                    is_leader = True
+    
+    # 从数据库中查询
+    if not is_leader:
         init_alliance_db()
-        conn = sqlite3.connect("identifier.sqlite")
-        cursor = conn.cursor()
-        
-        sql = f"SELECT leader_id FROM alliance_leaders WHERE belonging_group={group_id} AND alliance_type={leader_alliance}"
-        cursor.execute(sql)
-        result = cursor.fetchone()
-        
-        if result and result[0] == leader_id:
-            is_leader = True
-        
-        cursor.close()
-        conn.close()
+        conn = db_pool.get_connection()
+        try:
+            cursor = conn.cursor()
+            
+            sql = f"SELECT leader_id FROM alliance_leaders WHERE belonging_group={group_id} AND alliance_type={leader_alliance}"
+            cursor.execute(sql)
+            result = cursor.fetchone()
+            
+            if result and result[0] == leader_id:
+                is_leader = True
+        finally:
+            db_pool.return_connection(conn)
     
     if not is_leader:
         return "只有联盟领袖才能解散联盟！"
     
-    # 解散联盟
+    # 解散联盟：将所有成员的联盟类型设为无联盟
     init_alliance_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 将所有成员的联盟设为无
-    sql = f"UPDATE alliance_members SET alliance_type={ALLIANCE_NONE} WHERE belonging_group={group_id} AND alliance_type={leader_alliance}"
-    cursor.execute(sql)
-    
-    # 删除领袖记录
-    sql = f"DELETE FROM alliance_leaders WHERE belonging_group={group_id} AND alliance_type={leader_alliance}"
-    cursor.execute(sql)
-    
-    conn.commit()
-    
-    # 更新内存中的记录
-    if group_id in alliance_members and leader_alliance in alliance_members[group_id]:
-        alliance_members[group_id][leader_alliance] = []
-    
-    if group_id in alliance_leaders and leader_alliance in alliance_leaders[group_id]:
-        del alliance_leaders[group_id][leader_alliance]
-    
-    cursor.close()
-    conn.close()
-    return f"你已成功解散{ALLIANCE_NAMES[leader_alliance]}！"
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        # 获取所有成员ID，用于更新缓存
+        sql = f"SELECT uid FROM alliance_members WHERE belonging_group={group_id} AND alliance_type={leader_alliance}"
+        cursor.execute(sql)
+        members = cursor.fetchall()
+        
+        # 将所有成员的联盟类型设为无联盟
+        sql = f"UPDATE alliance_members SET alliance_type={ALLIANCE_NONE} WHERE belonging_group={group_id} AND alliance_type={leader_alliance}"
+        cursor.execute(sql)
+        conn.commit()
+        
+        # 删除联盟领袖记录
+        sql = f"DELETE FROM alliance_leaders WHERE belonging_group={group_id} AND alliance_type={leader_alliance}"
+        cursor.execute(sql)
+        conn.commit()
+        
+        # 更新缓存
+        with cache_lock:
+            # 更新成员缓存
+            for member in members:
+                member_id = member[0]
+                cache_key = (group_id, member_id)
+                if cache_key in user_alliance_cache:
+                    user_alliance_cache[cache_key] = (ALLIANCE_NONE, time.time())
+            
+            # 删除领袖缓存
+            if leader_cache_key in alliance_leader_cache:
+                del alliance_leader_cache[leader_cache_key]
+        
+        # 更新内存中的记录
+        if group_id in alliance_leaders and leader_alliance in alliance_leaders[group_id]:
+            del alliance_leaders[group_id][leader_alliance]
+        
+        if group_id in alliance_members and leader_alliance in alliance_members[group_id]:
+            del alliance_members[group_id][leader_alliance]
+        
+        return f"你已成功解散{ALLIANCE_NAMES[leader_alliance]}！"
+    finally:
+        db_pool.return_connection(conn)
 
 def get_alliance_members(group_id: int, alliance_type: int) -> List[int]:
     """获取联盟成员列表"""
     init_alliance_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    sql = f"SELECT uid FROM alliance_members WHERE belonging_group={group_id} AND alliance_type={alliance_type}"
-    cursor.execute(sql)
-    results = cursor.fetchall()
-    
-    members = [result[0] for result in results]
-    
-    cursor.close()
-    conn.close()
-    
-    # 更新内存中的成员记录
-    if group_id not in alliance_members:
-        alliance_members[group_id] = {}
-    alliance_members[group_id][alliance_type] = members
-    
-    return members
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        sql = f"SELECT uid FROM alliance_members WHERE belonging_group={group_id} AND alliance_type={alliance_type}"
+        cursor.execute(sql)
+        members = [row[0] for row in cursor.fetchall()]
+        
+        return members
+    finally:
+        db_pool.return_connection(conn)
 
 def get_alliance_leader(group_id: int, alliance_type: int) -> int:
     """获取联盟领袖ID"""
@@ -443,6 +466,27 @@ def check_business_alliance_bonus(group_id: int, user_id: int) -> bool:
     """检查用户是否有商业联盟加成（交易税减免）"""
     alliance_type = get_user_alliance(group_id, user_id)
     return alliance_type == ALLIANCE_BUSINESS
+
+# 缓存清理函数
+def clear_alliance_cache():
+    """清理过期缓存"""
+    current_time = time.time()
+    with cache_lock:
+        # 清理用户联盟缓存
+        expired_keys = [key for key, (_, timestamp) in user_alliance_cache.items() if current_time - timestamp > CACHE_EXPIRY]
+        for key in expired_keys:
+            del user_alliance_cache[key]
+        
+        # 清理联盟领袖缓存
+        expired_keys = [key for key, (_, timestamp) in alliance_leader_cache.items() if current_time - timestamp > CACHE_EXPIRY]
+        for key in expired_keys:
+            del alliance_leader_cache[key]
+
+# 定期清理缓存
+@scheduler.scheduled_job('cron', minute='*/10', id='clear_alliance_cache')
+async def schedule_clear_alliance_cache():
+    """每10分钟清理一次联盟缓存"""
+    clear_alliance_cache()
 
 def check_military_alliance_bonus(group_id: int, user_id: int) -> Tuple[bool, bool]:
     """检查用户是否有军事同盟加成（抢劫概率降低和资源保护）"""

@@ -2,6 +2,7 @@ import sqlite3
 import datetime
 import random
 import time
+import threading
 from typing import Dict, List, Tuple, Optional, Union
 
 from .resource import get_user_resource, get_user_stamina, produce_resource, update_user_resource, update_user_stamina
@@ -14,6 +15,49 @@ from .common import (
     SPECIAL_BLUE_GEM, SPECIAL_SUPER_PLANT, SPECIAL_DEMON_BRANCH,
     TOOL_DURABILITY, MAX_STAMINA, RESOURCE_STAMINA_COST, RESOURCE_OUTPUT
 )
+
+# 数据库连接池
+class DatabasePool:
+    def __init__(self, db_name="identifier.sqlite", max_connections=5):
+        self.db_name = db_name
+        self.max_connections = max_connections
+        self.connections = []
+        self.lock = threading.Lock()
+        
+        # 初始化连接池
+        for _ in range(min(3, max_connections)):
+            self.connections.append(self._create_connection())
+    
+    def _create_connection(self):
+        return sqlite3.connect(self.db_name, check_same_thread=False)
+    
+    def get_connection(self):
+        with self.lock:
+            if self.connections:
+                return self.connections.pop()
+            else:
+                return self._create_connection()
+    
+    def return_connection(self, conn):
+        with self.lock:
+            if len(self.connections) < self.max_connections:
+                self.connections.append(conn)
+            else:
+                conn.close()
+
+# 创建全局数据库连接池
+db_pool = DatabasePool()
+
+# 缓存字典
+user_profession_cache = {}
+special_resource_cache = {}
+tool_durability_cache = {}
+
+# 缓存锁
+cache_lock = threading.Lock()
+
+# 缓存过期时间（秒）
+CACHE_EXPIRY = 300
 
 # 工具制作材料
 TOOL_CRAFTING_MATERIALS = {
@@ -42,9 +86,25 @@ def get_resource_functions():
         'set_resource_cd': resource.set_resource_cd
     }
 
+# 定期清理缓存的函数
+def clear_profession_cache():
+    with cache_lock:
+        user_profession_cache.clear()
+        special_resource_cache.clear()
+        tool_durability_cache.clear()
+
+# 导入定时器
+import asyncio
+
+# 定期清理缓存（每10分钟）
+async def schedule_clear_profession_cache():
+    while True:
+        await asyncio.sleep(600)
+        clear_profession_cache()
+
 def init_profession_db():
     """初始化职业系统数据库"""
-    conn = sqlite3.connect("identifier.sqlite")
+    conn = db_pool.get_connection()
     cursor = conn.cursor()
     
     # 创建用户职业表
@@ -116,12 +176,18 @@ def init_profession_db():
     
     conn.commit()
     cursor.close()
-    conn.close()
+    db_pool.return_connection(conn)
 
 def get_user_profession(group_id: int, user_id: int) -> int:
     """获取用户职业"""
+    # 先检查缓存
+    cache_key = (group_id, user_id)
+    with cache_lock:
+        if cache_key in user_profession_cache:
+            return user_profession_cache[cache_key]
+    
     init_profession_db()
-    conn = sqlite3.connect("identifier.sqlite")
+    conn = db_pool.get_connection()
     cursor = conn.cursor()
     
     sql = f"SELECT profession FROM user_profession WHERE uid={user_id} AND belonging_group={group_id}"
@@ -137,8 +203,12 @@ def get_user_profession(group_id: int, user_id: int) -> int:
     else:
         profession = result[0]
     
+    # 更新缓存
+    with cache_lock:
+        user_profession_cache[cache_key] = profession
+    
     cursor.close()
-    conn.close()
+    db_pool.return_connection(conn)
     return profession
 
 def check_profession_change_cd(group_id: int, user_id: int) -> Tuple[bool, str]:
@@ -156,7 +226,7 @@ def check_profession_change_cd(group_id: int, user_id: int) -> Tuple[bool, str]:
     
     # 检查数据库
     init_profession_db()
-    conn = sqlite3.connect("identifier.sqlite")
+    conn = db_pool.get_connection()
     cursor = conn.cursor()
     
     sql = f"SELECT next_change_date FROM profession_change_cd WHERE uid={user_id} AND belonging_group={group_id}"
@@ -166,7 +236,7 @@ def check_profession_change_cd(group_id: int, user_id: int) -> Tuple[bool, str]:
     if result is None:
         # 没有CD记录
         cursor.close()
-        conn.close()
+        db_pool.return_connection(conn)
         return True, ""
     else:
         next_change_date = datetime.datetime.strptime(result[0], "%Y-%m-%d").date()
@@ -181,7 +251,7 @@ def check_profession_change_cd(group_id: int, user_id: int) -> Tuple[bool, str]:
             profession_change_cd[(group_id, user_id)] = next_change_time
             
             cursor.close()
-            conn.close()
+            db_pool.return_connection(conn)
             return False, f"职业切换CD中，还需等待{days_remaining}天"
         else:
             # CD已结束，删除记录
@@ -189,7 +259,7 @@ def check_profession_change_cd(group_id: int, user_id: int) -> Tuple[bool, str]:
             cursor.execute(sql)
             conn.commit()
             cursor.close()
-            conn.close()
+            db_pool.return_connection(conn)
             return True, ""
 
 def set_profession_change_cd(group_id: int, user_id: int) -> None:
@@ -203,7 +273,7 @@ def set_profession_change_cd(group_id: int, user_id: int) -> None:
     
     # 更新数据库
     init_profession_db()
-    conn = sqlite3.connect("identifier.sqlite")
+    conn = db_pool.get_connection()
     cursor = conn.cursor()
     
     sql = f"SELECT id FROM profession_change_cd WHERE uid={user_id} AND belonging_group={group_id}"
@@ -220,7 +290,7 @@ def set_profession_change_cd(group_id: int, user_id: int) -> None:
     cursor.execute(sql)
     conn.commit()
     cursor.close()
-    conn.close()
+    db_pool.return_connection(conn)
 
 def change_profession(group_id: int, user_id: int, new_profession: int) -> str:
     """切换职业"""
@@ -243,7 +313,7 @@ def change_profession(group_id: int, user_id: int, new_profession: int) -> str:
     
     # 更新职业
     init_profession_db()
-    conn = sqlite3.connect("identifier.sqlite")
+    conn = db_pool.get_connection()
     cursor = conn.cursor()
     
     today = datetime.datetime.now().date().isoformat()
@@ -261,7 +331,13 @@ def change_profession(group_id: int, user_id: int, new_profession: int) -> str:
         set_profession_change_cd(group_id, user_id)
     
     cursor.close()
-    conn.close()
+    db_pool.return_connection(conn)
+    
+    # 清除缓存
+    cache_key = (group_id, user_id)
+    with cache_lock:
+        if cache_key in user_profession_cache:
+            del user_profession_cache[cache_key]
     
     # 如果从牛马职业切换出来，结束打工状态
     if current_profession == PROF_WORKER:
@@ -276,10 +352,17 @@ def change_profession(group_id: int, user_id: int, new_profession: int) -> str:
     
     return message
 
+
 def get_special_resource(group_id: int, user_id: int, resource_type: int) -> int:
     """获取特殊资源数量"""
+    # 先检查缓存
+    cache_key = (group_id, user_id, resource_type)
+    with cache_lock:
+        if cache_key in special_resource_cache:
+            return special_resource_cache[cache_key]
+    
     init_profession_db()
-    conn = sqlite3.connect("identifier.sqlite")
+    conn = db_pool.get_connection()
     cursor = conn.cursor()
     
     sql = f"SELECT amount FROM special_resources WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type}"
@@ -295,18 +378,27 @@ def get_special_resource(group_id: int, user_id: int, resource_type: int) -> int
     else:
         amount = result[0]
     
+    # 更新缓存
+    with cache_lock:
+        special_resource_cache[cache_key] = amount
+    
     cursor.close()
-    conn.close()
+    db_pool.return_connection(conn)
     return amount
 
 def update_special_resource(group_id: int, user_id: int, resource_type: int, amount: int) -> None:
     """更新特殊资源数量"""
-    init_profession_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
     # 确保资源数量不为负
     amount = max(0, amount)
+    
+    # 更新缓存
+    cache_key = (group_id, user_id, resource_type)
+    with cache_lock:
+        special_resource_cache[cache_key] = amount
+    
+    init_profession_db()
+    conn = db_pool.get_connection()
+    cursor = conn.cursor()
     
     sql = f"SELECT id FROM special_resources WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type}"
     cursor.execute(sql)
@@ -322,12 +414,18 @@ def update_special_resource(group_id: int, user_id: int, resource_type: int, amo
     cursor.execute(sql)
     conn.commit()
     cursor.close()
-    conn.close()
+    db_pool.return_connection(conn)
 
 def get_tool_durability(group_id: int, user_id: int, tool_type: int, tool_category: int) -> int:
     """获取工具耐久度"""
+    # 先检查缓存
+    cache_key = (group_id, user_id, tool_type, tool_category)
+    with cache_lock:
+        if cache_key in tool_durability_cache:
+            return tool_durability_cache[cache_key]
+    
     init_profession_db()
-    conn = sqlite3.connect("identifier.sqlite")
+    conn = db_pool.get_connection()
     cursor = conn.cursor()
     
     sql = f"SELECT durability FROM user_tool_durability WHERE uid={user_id} AND belonging_group={group_id} AND tool_type={tool_type} AND tool_category={tool_category}"
@@ -340,19 +438,28 @@ def get_tool_durability(group_id: int, user_id: int, tool_type: int, tool_catego
     else:
         durability = result[0]
     
+    # 更新缓存
+    with cache_lock:
+        tool_durability_cache[cache_key] = durability
+    
     cursor.close()
-    conn.close()
+    db_pool.return_connection(conn)
     return durability
 
 def update_tool_durability(group_id: int, user_id: int, tool_type: int, tool_category: int, durability: int) -> None:
     """更新工具耐久度"""
-    init_profession_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
     # 确保耐久度不为负（除非是无限耐久的工具）
     if tool_type != TOOL_ALLOY_PERM:
         durability = max(0, durability)
+    
+    # 更新缓存
+    cache_key = (group_id, user_id, tool_type, tool_category)
+    with cache_lock:
+        tool_durability_cache[cache_key] = durability
+    
+    init_profession_db()
+    conn = db_pool.get_connection()
+    cursor = conn.cursor()
     
     sql = f"SELECT id FROM user_tool_durability WHERE uid={user_id} AND belonging_group={group_id} AND tool_type={tool_type} AND tool_category={tool_category}"
     cursor.execute(sql)
@@ -373,7 +480,7 @@ def update_tool_durability(group_id: int, user_id: int, tool_type: int, tool_cat
     
     conn.commit()
     cursor.close()
-    conn.close()
+    db_pool.return_connection(conn)
 
 def get_best_tool(group_id: int, user_id: int, tool_category: int) -> Tuple[int, int]:
     """获取用户最好的工具及其耐久度"""
@@ -439,7 +546,7 @@ def start_working(group_id: int, user_id: int) -> str:
     
     # 获取每小时工资
     init_profession_db()
-    conn = sqlite3.connect("identifier.sqlite")
+    conn = db_pool.get_connection()
     cursor = conn.cursor()
     
     sql = f"SELECT working_hours, hourly_wage FROM user_profession WHERE uid={user_id} AND belonging_group={group_id}"
@@ -458,7 +565,7 @@ def start_working(group_id: int, user_id: int) -> str:
     cursor.execute(sql)
     conn.commit()
     cursor.close()
-    conn.close()
+    db_pool.return_connection(conn)
     
     return f"开始打工！当前时薪：{hourly_wage}金币/小时\n累计打工时长：{working_hours}小时"
 
@@ -468,7 +575,7 @@ def end_working(group_id: int, user_id: int) -> str:
     if (group_id, user_id) not in working_status:
         # 检查数据库
         init_profession_db()
-        conn = sqlite3.connect("identifier.sqlite")
+        conn = db_pool.get_connection()
         cursor = conn.cursor()
         
         sql = f"SELECT start_time, hourly_wage FROM working_status WHERE uid={user_id} AND belonging_group={group_id}"
@@ -477,7 +584,7 @@ def end_working(group_id: int, user_id: int) -> str:
         
         if result is None:
             cursor.close()
-            conn.close()
+            db_pool.return_connection(conn)
             return "你没有在打工"
         
         # 恢复打工状态
@@ -486,7 +593,7 @@ def end_working(group_id: int, user_id: int) -> str:
         working_status[(group_id, user_id)] = {"start_time": start_time, "hourly_wage": hourly_wage}
         
         cursor.close()
-        conn.close()
+        db_pool.return_connection(conn)
     
     # 计算打工时长和工资
     start_time = working_status[(group_id, user_id)]["start_time"]
@@ -507,7 +614,7 @@ def end_working(group_id: int, user_id: int) -> str:
     
     # 更新累计打工时长
     init_profession_db()
-    conn = sqlite3.connect("identifier.sqlite")
+    conn = db_pool.get_connection()
     cursor = conn.cursor()
     
     sql = f"SELECT working_hours FROM user_profession WHERE uid={user_id} AND belonging_group={group_id}"
@@ -535,7 +642,7 @@ def end_working(group_id: int, user_id: int) -> str:
     
     conn.commit()
     cursor.close()
-    conn.close()
+    db_pool.return_connection(conn)
     
     # 删除内存中的打工状态
     del working_status[(group_id, user_id)]
@@ -548,6 +655,7 @@ def end_working(group_id: int, user_id: int) -> str:
     
     return message
 
+
 def refresh_hourly_wage(group_id: int, user_id: int) -> str:
     """根据累计打工时间重新计算正确的工资水平"""
     # 检查职业
@@ -557,7 +665,7 @@ def refresh_hourly_wage(group_id: int, user_id: int) -> str:
     
     # 获取累计打工时间
     init_profession_db()
-    conn = sqlite3.connect("identifier.sqlite")
+    conn = db_pool.get_connection()
     cursor = conn.cursor()
     
     sql = f"SELECT working_hours FROM user_profession WHERE uid={user_id} AND belonging_group={group_id}"
@@ -566,7 +674,7 @@ def refresh_hourly_wage(group_id: int, user_id: int) -> str:
     
     if result is None:
         cursor.close()
-        conn.close()
+        db_pool.return_connection(conn)
         return "未找到用户职业信息"
     
     total_working_hours = result[0] if result[0] is not None else 0
@@ -585,20 +693,20 @@ def refresh_hourly_wage(group_id: int, user_id: int) -> str:
     cursor.execute(sql)
     conn.commit()
     cursor.close()
-    conn.close()
+    db_pool.return_connection(conn)
     
     # 如果用户正在打工，也需要更新打工状态中的时薪
     if (group_id, user_id) in working_status:
         working_status[(group_id, user_id)]["hourly_wage"] = correct_hourly_wage
         
         # 更新数据库中的打工状态
-        conn = sqlite3.connect("identifier.sqlite")
+        conn = db_pool.get_connection()
         cursor = conn.cursor()
         sql = f"UPDATE working_status SET hourly_wage={correct_hourly_wage} WHERE uid={user_id} AND belonging_group={group_id}"
         cursor.execute(sql)
         conn.commit()
         cursor.close()
-        conn.close()
+        db_pool.return_connection(conn)
     
     return f"工资刷新成功！\n累计打工时长：{total_working_hours}小时\n工资等级：{wage_level}级\n当前时薪：{correct_hourly_wage}金币/小时"
 
@@ -770,6 +878,7 @@ def produce_resource_with_stamina_recovery(group_id: int, user_id: int, resource
     
     return message
 
+
 def craft_tool(group_id: int, user_id: int, tool_type: int, tool_category: int) -> str:
     """打造工具（铁匠职业）"""
     # 检查职业
@@ -832,6 +941,7 @@ def craft_tool(group_id: int, user_id: int, tool_type: int, tool_category: int) 
     
     return message
 
+
 def upgrade_tool(group_id: int, user_id: int, tool_category: int) -> str:
     """升级工具为不毁版（铁匠职业）"""
     # 检查职业
@@ -884,6 +994,7 @@ def upgrade_tool(group_id: int, user_id: int, tool_category: int) -> str:
     
     return message
 
+
 def get_profession_info(group_id: int, user_id: int) -> str:
     """获取职业信息"""
     profession = get_user_profession(group_id, user_id)
@@ -904,7 +1015,7 @@ def get_profession_info(group_id: int, user_id: int) -> str:
     if profession == PROF_WORKER:
         # 牛马职业：显示打工信息
         init_profession_db()
-        conn = sqlite3.connect("identifier.sqlite")
+        conn = db_pool.get_connection()
         cursor = conn.cursor()
         
         sql = f"SELECT working_hours, hourly_wage FROM user_profession WHERE uid={user_id} AND belonging_group={group_id}"
@@ -915,7 +1026,7 @@ def get_profession_info(group_id: int, user_id: int) -> str:
         hourly_wage = result[1] if result else 10
         
         cursor.close()
-        conn.close()
+        db_pool.return_connection(conn)
         
         message += f"\n===== 牛马职业信息 =====\n"
         message += f"累计打工时长：{working_hours}小时\n"
@@ -990,3 +1101,21 @@ def get_profession_info(group_id: int, user_id: int) -> str:
     message += f"恶魔树枝干：{demon_branch}个\n"
     
     return message
+
+# 初始化数据库
+init_profession_db()
+
+# 启动缓存清理任务
+def start_cache_cleanup():
+    import asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.create_task(schedule_clear_profession_cache())
+    loop.run_forever()
+
+# 在后台线程中启动缓存清理
+try:
+    cache_cleanup_thread = threading.Thread(target=start_cache_cleanup, daemon=True)
+    cache_cleanup_thread.start()
+except Exception as e:
+    print(f"启动缓存清理任务失败: {e}")

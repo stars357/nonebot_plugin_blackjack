@@ -2,8 +2,11 @@ import sqlite3
 import datetime
 import random
 import time
+import threading
 from typing import Dict, List, Tuple, Optional, Union
+from nonebot_plugin_apscheduler import scheduler
 from .sign import get_point, update_point
+from .game import db_pool
 # 导入共享常量和函数
 from .common import (
     PROF_FARMER, PROF_LUMBERJACK, PROF_MINER, RESOURCE_FOOD, RESOURCE_WOOD, RESOURCE_ORE,
@@ -16,222 +19,305 @@ from .common import (
 # 资源生产CD字典 {(group_id, user_id, resource_type): end_time}
 resource_cd: Dict[Tuple[int, int, int], datetime.datetime] = {}
 
+# 缓存字典
+user_stamina_cache: Dict[Tuple[int, int], Tuple[int, float]] = {}  # {(group_id, user_id): (stamina, timestamp)}
+user_resource_cache: Dict[Tuple[int, int, int], Tuple[int, float]] = {}  # {(group_id, user_id, resource_type): (amount, timestamp)}
+user_tool_cache: Dict[Tuple[int, int, int], Tuple[int, float]] = {}  # {(group_id, user_id, tool_type): (amount, timestamp)}
+
+# 缓存锁
+cache_lock = threading.Lock()
+
+# 缓存过期时间（秒）
+CACHE_EXPIRY = 300
+
 def init_resource_db():
     """初始化资源数据库"""
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 创建用户体力表
-    sql = """
-    CREATE TABLE IF NOT EXISTS user_stamina (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid INTEGER NOT NULL,
-        belonging_group INTEGER NOT NULL,
-        stamina INTEGER NOT NULL DEFAULT 100,
-        last_refresh DATE,
-        UNIQUE(uid, belonging_group)
-    )
-    """
-    cursor.execute(sql)
-    
-    # 创建用户资源表
-    sql = """
-    CREATE TABLE IF NOT EXISTS user_resources (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid INTEGER NOT NULL,
-        belonging_group INTEGER NOT NULL,
-        resource_type INTEGER NOT NULL,  -- 0: 食物, 1: 木材, 2: 矿石
-        amount INTEGER NOT NULL DEFAULT 0,
-        UNIQUE(uid, belonging_group, resource_type)
-    )
-    """
-    cursor.execute(sql)
-    
-    # 创建用户工具表
-    sql = """
-    CREATE TABLE IF NOT EXISTS user_tools (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid INTEGER NOT NULL,
-        belonging_group INTEGER NOT NULL,
-        tool_type INTEGER NOT NULL,  -- 0: 铁质工具, 1: 精金工具, 2: 强化合金工具, 3: 强化合金工具【不毁】
-        amount INTEGER NOT NULL DEFAULT 0,
-        UNIQUE(uid, belonging_group, tool_type)
-    )
-    """
-    cursor.execute(sql)
-    
-    # 创建资源生产CD表
-    sql = """
-    CREATE TABLE IF NOT EXISTS resource_production_cd (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid INTEGER NOT NULL,
-        belonging_group INTEGER NOT NULL,
-        resource_type INTEGER NOT NULL,  -- 0: 食物, 1: 木材, 2: 矿石
-        end_time TIMESTAMP NOT NULL,
-        UNIQUE(uid, belonging_group, resource_type)
-    )
-    """
-    cursor.execute(sql)
-    
-    conn.commit()
-    cursor.close()
-    conn.close()
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        # 创建用户体力表
+        sql = """
+        CREATE TABLE IF NOT EXISTS user_stamina (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid INTEGER NOT NULL,
+            belonging_group INTEGER NOT NULL,
+            stamina INTEGER NOT NULL DEFAULT 100,
+            last_refresh DATE,
+            UNIQUE(uid, belonging_group)
+        )
+        """
+        cursor.execute(sql)
+        
+        # 创建用户资源表
+        sql = """
+        CREATE TABLE IF NOT EXISTS user_resources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid INTEGER NOT NULL,
+            belonging_group INTEGER NOT NULL,
+            resource_type INTEGER NOT NULL,  -- 0: 食物, 1: 木材, 2: 矿石
+            amount INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(uid, belonging_group, resource_type)
+        )
+        """
+        cursor.execute(sql)
+        
+        # 创建用户工具表
+        sql = """
+        CREATE TABLE IF NOT EXISTS user_tools (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid INTEGER NOT NULL,
+            belonging_group INTEGER NOT NULL,
+            tool_type INTEGER NOT NULL,  -- 0: 铁质工具, 1: 精金工具, 2: 强化合金工具, 3: 强化合金工具【不毁】
+            amount INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(uid, belonging_group, tool_type)
+        )
+        """
+        cursor.execute(sql)
+        
+        # 创建资源生产CD表
+        sql = """
+        CREATE TABLE IF NOT EXISTS resource_production_cd (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid INTEGER NOT NULL,
+            belonging_group INTEGER NOT NULL,
+            resource_type INTEGER NOT NULL,  -- 0: 食物, 1: 木材, 2: 矿石
+            end_time TIMESTAMP NOT NULL,
+            UNIQUE(uid, belonging_group, resource_type)
+        )
+        """
+        cursor.execute(sql)
+        
+        conn.commit()
+    finally:
+        db_pool.return_connection(conn)
 
 def get_user_stamina(group_id: int, user_id: int) -> int:
     """获取用户体力值"""
     init_resource_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
     
-    # 检查是否需要刷新体力（每天刷新一次）
+    # 检查缓存
+    cache_key = (group_id, user_id)
     today = datetime.date.today().isoformat()
     
-    sql = f"SELECT stamina, last_refresh FROM user_stamina WHERE uid={user_id} AND belonging_group={group_id}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
+    with cache_lock:
+        if cache_key in user_stamina_cache:
+            stamina, timestamp, last_refresh_cache = user_stamina_cache[cache_key]
+            # 如果缓存未过期且最后刷新日期是今天，直接返回
+            if time.time() - timestamp < CACHE_EXPIRY and last_refresh_cache == today:
+                return stamina
     
-    if result is None:
-        # 创建新记录，默认体力为100
-        sql = f"INSERT INTO user_stamina (uid, belonging_group, stamina, last_refresh) VALUES ({user_id}, {group_id}, {MAX_STAMINA}, '{today}')"
-        cursor.execute(sql)
-        conn.commit()
-        stamina = MAX_STAMINA
-    else:
-        stamina, last_refresh = result
+    # 从数据库获取
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
         
-        # 检查是否需要刷新体力（每天刷新一次）
-        if last_refresh != today:
-            stamina = MAX_STAMINA
-            sql = f"UPDATE user_stamina SET stamina={stamina}, last_refresh='{today}' WHERE uid={user_id} AND belonging_group={group_id}"
+        sql = f"SELECT stamina, last_refresh FROM user_stamina WHERE uid={user_id} AND belonging_group={group_id}"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新记录，默认体力为100
+            sql = f"INSERT INTO user_stamina (uid, belonging_group, stamina, last_refresh) VALUES ({user_id}, {group_id}, {MAX_STAMINA}, '{today}')"
             cursor.execute(sql)
             conn.commit()
-    
-    cursor.close()
-    conn.close()
-    return stamina
+            stamina = MAX_STAMINA
+            last_refresh = today
+        else:
+            stamina, last_refresh = result
+            
+            # 检查是否需要刷新体力（每天刷新一次）
+            if last_refresh != today:
+                stamina = MAX_STAMINA
+                sql = f"UPDATE user_stamina SET stamina={stamina}, last_refresh='{today}' WHERE uid={user_id} AND belonging_group={group_id}"
+                cursor.execute(sql)
+                conn.commit()
+                last_refresh = today
+        
+        # 更新缓存
+        with cache_lock:
+            user_stamina_cache[cache_key] = (stamina, time.time(), last_refresh)
+        
+        return stamina
+    finally:
+        db_pool.return_connection(conn)
 
 def update_user_stamina(group_id: int, user_id: int, stamina: int) -> None:
     """更新用户体力值"""
     init_resource_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
     
     # 确保体力不超过上限
     stamina = min(MAX_STAMINA, max(0, stamina))
     
     today = datetime.date.today().isoformat()
     
-    sql = f"SELECT id FROM user_stamina WHERE uid={user_id} AND belonging_group={group_id}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        # 创建新记录
-        sql = f"INSERT INTO user_stamina (uid, belonging_group, stamina, last_refresh) VALUES ({user_id}, {group_id}, {stamina}, '{today}')"
-    else:
-        # 更新记录
-        sql = f"UPDATE user_stamina SET stamina={stamina} WHERE uid={user_id} AND belonging_group={group_id}"
-    
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    conn.close()
+    # 更新数据库
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        sql = f"SELECT id FROM user_stamina WHERE uid={user_id} AND belonging_group={group_id}"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新记录
+            sql = f"INSERT INTO user_stamina (uid, belonging_group, stamina, last_refresh) VALUES ({user_id}, {group_id}, {stamina}, '{today}')"
+        else:
+            # 更新记录
+            sql = f"UPDATE user_stamina SET stamina={stamina} WHERE uid={user_id} AND belonging_group={group_id}"
+        
+        cursor.execute(sql)
+        conn.commit()
+        
+        # 更新缓存
+        cache_key = (group_id, user_id)
+        with cache_lock:
+            user_stamina_cache[cache_key] = (stamina, time.time(), today)
+    finally:
+        db_pool.return_connection(conn)
 
 def get_user_resource(group_id: int, user_id: int, resource_type: int) -> int:
     """获取用户资源数量"""
     init_resource_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
     
-    sql = f"SELECT amount FROM user_resources WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
+    # 检查缓存
+    cache_key = (group_id, user_id, resource_type)
+    with cache_lock:
+        if cache_key in user_resource_cache:
+            amount, timestamp = user_resource_cache[cache_key]
+            if time.time() - timestamp < CACHE_EXPIRY:
+                return amount
     
-    if result is None:
-        # 创建新记录
-        sql = f"INSERT INTO user_resources (uid, belonging_group, resource_type, amount) VALUES ({user_id}, {group_id}, {resource_type}, 0)"
+    # 从数据库获取
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        sql = f"SELECT amount FROM user_resources WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type}"
         cursor.execute(sql)
-        conn.commit()
-        amount = 0
-    else:
-        amount = result[0]
-    
-    cursor.close()
-    conn.close()
-    return amount
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新记录
+            sql = f"INSERT INTO user_resources (uid, belonging_group, resource_type, amount) VALUES ({user_id}, {group_id}, {resource_type}, 0)"
+            cursor.execute(sql)
+            conn.commit()
+            amount = 0
+        else:
+            amount = result[0]
+        
+        # 更新缓存
+        with cache_lock:
+            user_resource_cache[cache_key] = (amount, time.time())
+        
+        return amount
+    finally:
+        db_pool.return_connection(conn)
 
 def update_user_resource(group_id: int, user_id: int, resource_type: int, amount: int) -> None:
     """更新用户资源数量"""
     init_resource_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
     
     # 确保资源数量不为负
     amount = max(0, amount)
     
-    sql = f"SELECT id FROM user_resources WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        # 创建新记录
-        sql = f"INSERT INTO user_resources (uid, belonging_group, resource_type, amount) VALUES ({user_id}, {group_id}, {resource_type}, {amount})"
-    else:
-        # 更新记录
-        sql = f"UPDATE user_resources SET amount={amount} WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type}"
-    
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    conn.close()
+    # 更新数据库
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        sql = f"SELECT id FROM user_resources WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type}"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新记录
+            sql = f"INSERT INTO user_resources (uid, belonging_group, resource_type, amount) VALUES ({user_id}, {group_id}, {resource_type}, {amount})"
+        else:
+            # 更新记录
+            sql = f"UPDATE user_resources SET amount={amount} WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type}"
+        
+        cursor.execute(sql)
+        conn.commit()
+        
+        # 更新缓存
+        cache_key = (group_id, user_id, resource_type)
+        with cache_lock:
+            user_resource_cache[cache_key] = (amount, time.time())
+    finally:
+        db_pool.return_connection(conn)
 
 def get_user_tool(group_id: int, user_id: int, tool_type: int) -> int:
     """获取用户工具数量"""
     init_resource_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
     
-    sql = f"SELECT amount FROM user_tools WHERE uid={user_id} AND belonging_group={group_id} AND tool_type={tool_type}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
+    # 检查缓存
+    cache_key = (group_id, user_id, tool_type)
+    with cache_lock:
+        if cache_key in user_tool_cache:
+            amount, timestamp = user_tool_cache[cache_key]
+            if time.time() - timestamp < CACHE_EXPIRY:
+                return amount
     
-    if result is None:
-        # 创建新记录
-        sql = f"INSERT INTO user_tools (uid, belonging_group, tool_type, amount) VALUES ({user_id}, {group_id}, {tool_type}, 0)"
+    # 从数据库获取
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        sql = f"SELECT amount FROM user_tools WHERE uid={user_id} AND belonging_group={group_id} AND tool_type={tool_type}"
         cursor.execute(sql)
-        conn.commit()
-        amount = 0
-    else:
-        amount = result[0]
-    
-    cursor.close()
-    conn.close()
-    return amount
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新记录
+            sql = f"INSERT INTO user_tools (uid, belonging_group, tool_type, amount) VALUES ({user_id}, {group_id}, {tool_type}, 0)"
+            cursor.execute(sql)
+            conn.commit()
+            amount = 0
+        else:
+            amount = result[0]
+        
+        # 更新缓存
+        with cache_lock:
+            user_tool_cache[cache_key] = (amount, time.time())
+        
+        return amount
+    finally:
+        db_pool.return_connection(conn)
 
 def update_user_tool(group_id: int, user_id: int, tool_type: int, amount: int) -> None:
     """更新用户工具数量"""
     init_resource_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
     
     # 确保工具数量不为负
     amount = max(0, amount)
     
-    sql = f"SELECT id FROM user_tools WHERE uid={user_id} AND belonging_group={group_id} AND tool_type={tool_type}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        # 创建新记录
-        sql = f"INSERT INTO user_tools (uid, belonging_group, tool_type, amount) VALUES ({user_id}, {group_id}, {tool_type}, {amount})"
-    else:
-        # 更新记录
-        sql = f"UPDATE user_tools SET amount={amount} WHERE uid={user_id} AND belonging_group={group_id} AND tool_type={tool_type}"
-    
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    conn.close()
+    # 更新数据库
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        sql = f"SELECT id FROM user_tools WHERE uid={user_id} AND belonging_group={group_id} AND tool_type={tool_type}"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新记录
+            sql = f"INSERT INTO user_tools (uid, belonging_group, tool_type, amount) VALUES ({user_id}, {group_id}, {tool_type}, {amount})"
+        else:
+            # 更新记录
+            sql = f"UPDATE user_tools SET amount={amount} WHERE uid={user_id} AND belonging_group={group_id} AND tool_type={tool_type}"
+        
+        cursor.execute(sql)
+        conn.commit()
+        
+        # 更新缓存
+        cache_key = (group_id, user_id, tool_type)
+        with cache_lock:
+            user_tool_cache[cache_key] = (amount, time.time())
+    finally:
+        db_pool.return_connection(conn)
 
 def check_resource_cd(group_id: int, user_id: int, resource_type: int) -> Tuple[bool, str]:
     """检查资源生产CD"""
@@ -250,40 +336,37 @@ def check_resource_cd(group_id: int, user_id: int, resource_type: int) -> Tuple[
     
     # 检查数据库
     init_resource_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    sql = f"SELECT end_time FROM resource_production_cd WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        # 没有CD记录
-        cursor.close()
-        conn.close()
-        return True, ""
-    else:
-        end_time = datetime.datetime.fromisoformat(result[0])
-        if datetime.datetime.now() < end_time:
-            # 仍在CD期内
-            remaining = end_time - datetime.datetime.now()
-            minutes = remaining.seconds // 60
-            seconds = remaining.seconds % 60
-            
-            # 更新内存记录
-            resource_cd[(group_id, user_id, resource_type)] = end_time
-            
-            cursor.close()
-            conn.close()
-            return False, f"生产CD中，还需等待{minutes}分{seconds}秒"
-        else:
-            # CD已结束，删除记录
-            sql = f"DELETE FROM resource_production_cd WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type}"
-            cursor.execute(sql)
-            conn.commit()
-            cursor.close()
-            conn.close()
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        sql = f"SELECT end_time FROM resource_production_cd WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type}"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 没有CD记录
             return True, ""
+        else:
+            end_time = datetime.datetime.fromisoformat(result[0])
+            if datetime.datetime.now() < end_time:
+                # 仍在CD期内
+                remaining = end_time - datetime.datetime.now()
+                minutes = remaining.seconds // 60
+                seconds = remaining.seconds % 60
+                
+                # 更新内存记录
+                resource_cd[(group_id, user_id, resource_type)] = end_time
+                
+                return False, f"生产CD中，还需等待{minutes}分{seconds}秒"
+            else:
+                # CD已结束，删除记录
+                sql = f"DELETE FROM resource_production_cd WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type}"
+                cursor.execute(sql)
+                conn.commit()
+                return True, ""
+    finally:
+        db_pool.return_connection(conn)
 
 def set_resource_cd(group_id: int, user_id: int, resource_type: int) -> None:
     """设置资源生产CD"""
@@ -296,24 +379,25 @@ def set_resource_cd(group_id: int, user_id: int, resource_type: int) -> None:
     
     # 更新数据库
     init_resource_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    sql = f"SELECT id FROM resource_production_cd WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        # 创建新记录
-        sql = f"INSERT INTO resource_production_cd (uid, belonging_group, resource_type, end_time) VALUES ({user_id}, {group_id}, {resource_type}, '{end_time.isoformat()}')"
-    else:
-        # 更新记录
-        sql = f"UPDATE resource_production_cd SET end_time='{end_time.isoformat()}' WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type}"
-    
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    conn.close()
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        sql = f"SELECT id FROM resource_production_cd WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type}"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新记录
+            sql = f"INSERT INTO resource_production_cd (uid, belonging_group, resource_type, end_time) VALUES ({user_id}, {group_id}, {resource_type}, '{end_time.isoformat()}')"
+        else:
+            # 更新记录
+            sql = f"UPDATE resource_production_cd SET end_time='{end_time.isoformat()}' WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type}"
+        
+        cursor.execute(sql)
+        conn.commit()
+    finally:
+        db_pool.return_connection(conn)
 
 def check_event_effect(group_id: int, resource_type: int) -> Tuple[bool, float]:
     """检查资源生产事件效果
@@ -499,29 +583,29 @@ def sell_resource(group_id: int, user_id: int, resource_type: int, amount: int) 
     is_top_three = False
     
     # 直接查询数据库获取富豪榜前三名
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 联合查询金币和银行存款，获取前三名用户
-    sql = f"""
-    SELECT s.uid, s.points + COALESCE(b.balance, 0) as total_wealth 
-    FROM sign_in s 
-    LEFT JOIN bank_accounts b ON s.uid = b.uid AND s.belonging_group = b.belonging_group 
-    WHERE s.belonging_group = {group_id} 
-    ORDER BY total_wealth DESC 
-    LIMIT 3
-    """
-    cursor.execute(sql)
-    top_three_users = cursor.fetchall()
-    
-    cursor.close()
-    conn.close()
-    
-    # 检查用户是否在前三名
-    for top_user_id, _ in top_three_users:
-        if top_user_id == user_id:
-            is_top_three = True
-            break
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        # 联合查询金币和银行存款，获取前三名用户
+        sql = f"""
+        SELECT s.uid, s.points + COALESCE(b.balance, 0) as total_wealth 
+        FROM sign_in s 
+        LEFT JOIN bank_accounts b ON s.uid = b.uid AND s.belonging_group = b.belonging_group 
+        WHERE s.belonging_group = {group_id} 
+        ORDER BY total_wealth DESC 
+        LIMIT 3
+        """
+        cursor.execute(sql)
+        top_three_users = cursor.fetchall()
+        
+        # 检查用户是否在前三名
+        for top_user_id, _ in top_three_users:
+            if top_user_id == user_id:
+                is_top_three = True
+                break
+    finally:
+        db_pool.return_connection(conn)
     
     # 计算获得的金币（根据特权决定是否扣除交易税）
     price = RESOURCE_PRICES[resource_type]
@@ -625,3 +709,40 @@ def get_resource_info(group_id: int, user_id: int) -> str:
     message += f"强化合金工具【不毁】：无基准价格"
     
     return message
+
+# 缓存清理函数
+def clear_resource_cache():
+    """清理过期缓存"""
+    current_time = time.time()
+    with cache_lock:
+        # 清理体力缓存
+        expired_keys = [key for key, (_, timestamp, _) in user_stamina_cache.items() if current_time - timestamp > CACHE_EXPIRY]
+        for key in expired_keys:
+            del user_stamina_cache[key]
+        
+        # 清理资源缓存
+        expired_keys = [key for key, (_, timestamp) in user_resource_cache.items() if current_time - timestamp > CACHE_EXPIRY]
+        for key in expired_keys:
+            del user_resource_cache[key]
+        
+        # 清理工具缓存
+        expired_keys = [key for key, (_, timestamp) in user_tool_cache.items() if current_time - timestamp > CACHE_EXPIRY]
+        for key in expired_keys:
+            del user_tool_cache[key]
+        
+        # 清理过期的CD记录
+        expired_keys = []
+        for key, end_time in resource_cd.items():
+            if datetime.datetime.now() > end_time:
+                expired_keys.append(key)
+        for key in expired_keys:
+            del resource_cd[key]
+
+# 定期清理缓存
+@scheduler.scheduled_job('cron', minute='*/10', id='clear_resource_cache')
+async def schedule_clear_resource_cache():
+    """每10分钟清理一次资源缓存"""
+    clear_resource_cache()
+
+# 初始化数据库
+init_resource_db()

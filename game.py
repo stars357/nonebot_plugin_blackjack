@@ -1,9 +1,49 @@
 from .card import Card
 from random import shuffle, randint, random
 import sqlite3
+import threading
 from nonebot.adapters.onebot.v11 import Bot
 from enum import Enum
 from typing import List, Dict, Tuple, Optional, Union
+
+# 数据库连接池
+class DatabasePool:
+    def __init__(self, db_name="identifier.sqlite", max_connections=5):
+        self.db_name = db_name
+        self.max_connections = max_connections
+        self.connections = []
+        self.lock = threading.Lock()
+        
+        # 初始化连接池
+        for _ in range(min(3, max_connections)):
+            self.connections.append(self._create_connection())
+    
+    def _create_connection(self):
+        return sqlite3.connect(self.db_name, check_same_thread=False)
+    
+    def get_connection(self):
+        with self.lock:
+            if self.connections:
+                return self.connections.pop()
+            else:
+                return self._create_connection()
+    
+    def return_connection(self, conn):
+        with self.lock:
+            if len(self.connections) < self.max_connections:
+                self.connections.append(conn)
+            else:
+                conn.close()
+
+# 创建全局数据库连接池
+db_pool = DatabasePool()
+
+# 用户点数缓存
+user_point_cache = {}
+cache_lock = threading.Lock()
+
+# 缓存过期时间（秒）
+CACHE_EXPIRY = 300
 
 
 # 添加游戏状态枚举类
@@ -368,67 +408,113 @@ async def count_score(game: Deck, player_win: int):
 
 
 def get_user_point(group: int, uid: int) -> float:
-    init()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    sql = f"select * from sign_in where belonging_group={group} and uid={uid}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    if result:
-        point = float(result[3])
-    else:
-        point = 0.0
-    cursor.close()
-    conn.commit()
-    conn.close()
-    return point
+    # 先检查缓存
+    cache_key = (group, uid)
+    with cache_lock:
+        if cache_key in user_point_cache:
+            return user_point_cache[cache_key]
+    
+    # 从数据库获取
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        sql = f"select * from sign_in where belonging_group={group} and uid={uid}"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        if result:
+            point = float(result[3])
+        else:
+            point = 0.0
+        
+        # 更新缓存
+        with cache_lock:
+            user_point_cache[cache_key] = point
+        
+        return point
+    finally:
+        db_pool.return_connection(conn)
 
 
 def update_point(group: int, uid: int, point: float):
-    init()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    sql = f"""update sign_in set points={point} where belonging_group={group} and uid={uid}"""
-    cursor.execute(sql)
-    cursor.close()
-    conn.commit()
-    conn.close()
+    # 更新数据库
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        sql = f"""update sign_in set points={point} where belonging_group={group} and uid={uid}"""
+        cursor.execute(sql)
+        conn.commit()
+        
+        # 更新缓存
+        cache_key = (group, uid)
+        with cache_lock:
+            user_point_cache[cache_key] = point
+    finally:
+        db_pool.return_connection(conn)
 
 
 def get_point(group: int, uid: int) -> float:
-    init()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    sql = f"select * from sign_in where belonging_group={group} and uid={uid}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    if result:
-        point = float(result[3])
-    else:
-        point = 0.0
-    cursor.close()
-    conn.commit()
-    conn.close()
-    return point
+    # 先检查缓存
+    cache_key = (group, uid)
+    with cache_lock:
+        if cache_key in user_point_cache:
+            return user_point_cache[cache_key]
+    
+    # 从数据库获取
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        sql = f"select * from sign_in where belonging_group={group} and uid={uid}"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        if result:
+            point = float(result[3])
+        else:
+            point = 0.0
+        
+        # 更新缓存
+        with cache_lock:
+            user_point_cache[cache_key] = point
+        
+        return point
+    finally:
+        db_pool.return_connection(conn)
 
 
 def init():
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    sql = """create table if not exists sign_in(
-        id integer primary key autoincrement,
-        sign_in_date datetime not null,
-        total_sign_in int not null,
-        points int not null,
-        belonging_group int not null,
-        uid int not null,
-        today_point int
-    )
-    """
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    conn.close()
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        sql = """create table if not exists sign_in(
+            id integer primary key autoincrement,
+            sign_in_date datetime not null,
+            total_sign_in int not null,
+            points int not null,
+            belonging_group int not null,
+            uid int not null,
+            today_point int
+        )
+        """
+        cursor.execute(sql)
+        conn.commit()
+    finally:
+        db_pool.return_connection(conn)
+
+# 初始化数据库
+init()
+
+# 定期清理缓存的函数
+def clear_cache():
+    with cache_lock:
+        user_point_cache.clear()
+
+# 导入定时器
+import asyncio
+
+# 定期清理缓存（每5分钟）
+async def schedule_cache_clear():
+    while True:
+        await asyncio.sleep(300)
+        clear_cache()
 
 
 async def get_game_ls(group: int):

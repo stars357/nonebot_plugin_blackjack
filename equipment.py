@@ -1,37 +1,51 @@
 import sqlite3
 import datetime
+import threading
+import time
 from typing import Dict, List, Tuple, Optional, Union
+from nonebot_plugin_apscheduler import scheduler
 from .common import (
     TOOL_IRON, TOOL_FINE_GOLD, TOOL_ALLOY, TOOL_ALLOY_PERM,
     TOOL_TYPE_PICKAXE, TOOL_TYPE_HOE, TOOL_TYPE_AXE
 )
 from .profession import get_tool_durability, update_tool_durability
+from .game import db_pool
 
 # 用户装备状态字典 {(group_id, user_id): {tool_category: tool_type}}
 equipped_tools: Dict[Tuple[int, int], Dict[int, int]] = {}
 
+# 装备缓存字典 {(group_id, user_id, tool_category): (tool_type, timestamp)}
+equipment_cache: Dict[Tuple[int, int, int], Tuple[int, float]] = {}
+
+# 缓存锁
+cache_lock = threading.Lock()
+
+# 缓存过期时间（秒）
+CACHE_EXPIRY = 300
+
 def init_equipment_db():
     """初始化装备系统数据库"""
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 创建用户装备表
-    sql = """
-    CREATE TABLE IF NOT EXISTS user_equipment (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid INTEGER NOT NULL,
-        belonging_group INTEGER NOT NULL,
-        tool_category INTEGER NOT NULL, -- 0: 镐, 1: 锄, 2: 斧
-        tool_type INTEGER NOT NULL,     -- 0: 铁质工具, 1: 精金工具, 2: 强化合金工具, 3: 强化合金工具【不毁】
-        equipped_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(uid, belonging_group, tool_category)
-    )
-    """
-    cursor.execute(sql)
-    
-    conn.commit()
-    cursor.close()
-    conn.close()
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        # 创建用户装备表
+        sql = """
+        CREATE TABLE IF NOT EXISTS user_equipment (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid INTEGER NOT NULL,
+            belonging_group INTEGER NOT NULL,
+            tool_category INTEGER NOT NULL, -- 0: 镐, 1: 锄, 2: 斧
+            tool_type INTEGER NOT NULL,     -- 0: 铁质工具, 1: 精金工具, 2: 强化合金工具, 3: 强化合金工具【不毁】
+            equipped_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(uid, belonging_group, tool_category)
+        )
+        """
+        cursor.execute(sql)
+        
+        conn.commit()
+    finally:
+        db_pool.return_connection(conn)
 
 def get_equipped_tool(group_id: int, user_id: int, tool_category: int) -> int:
     """获取用户当前装备的工具类型
@@ -48,29 +62,46 @@ def get_equipped_tool(group_id: int, user_id: int, tool_category: int) -> int:
     if (group_id, user_id) in equipped_tools and tool_category in equipped_tools[(group_id, user_id)]:
         return equipped_tools[(group_id, user_id)][tool_category]
     
+    # 检查缓存
+    cache_key = (group_id, user_id, tool_category)
+    with cache_lock:
+        if cache_key in equipment_cache:
+            tool_type, timestamp = equipment_cache[cache_key]
+            if time.time() - timestamp < CACHE_EXPIRY:
+                # 更新内存记录
+                if (group_id, user_id) not in equipped_tools:
+                    equipped_tools[(group_id, user_id)] = {}
+                equipped_tools[(group_id, user_id)][tool_category] = tool_type
+                return tool_type
+    
     # 从数据库查询
     init_equipment_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    sql = f"SELECT tool_type FROM user_equipment WHERE uid={user_id} AND belonging_group={group_id} AND tool_category={tool_category}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        # 未装备工具
-        tool_type = -1
-    else:
-        tool_type = result[0]
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
         
-        # 更新内存记录
-        if (group_id, user_id) not in equipped_tools:
-            equipped_tools[(group_id, user_id)] = {}
-        equipped_tools[(group_id, user_id)][tool_category] = tool_type
-    
-    cursor.close()
-    conn.close()
-    return tool_type
+        sql = f"SELECT tool_type FROM user_equipment WHERE uid={user_id} AND belonging_group={group_id} AND tool_category={tool_category}"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 未装备工具
+            tool_type = -1
+        else:
+            tool_type = result[0]
+            
+            # 更新内存记录
+            if (group_id, user_id) not in equipped_tools:
+                equipped_tools[(group_id, user_id)] = {}
+            equipped_tools[(group_id, user_id)][tool_category] = tool_type
+        
+        # 更新缓存
+        with cache_lock:
+            equipment_cache[cache_key] = (tool_type, time.time())
+        
+        return tool_type
+    finally:
+        db_pool.return_connection(conn)
 
 def equip_tool(group_id: int, user_id: int, tool_type: int, tool_category: int) -> str:
     """装备工具
@@ -110,43 +141,49 @@ def equip_tool(group_id: int, user_id: int, tool_type: int, tool_category: int) 
     
     # 更新装备状态
     init_equipment_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    sql = f"SELECT id FROM user_equipment WHERE uid={user_id} AND belonging_group={group_id} AND tool_category={tool_category}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        # 创建新记录
-        sql = f"INSERT INTO user_equipment (uid, belonging_group, tool_category, tool_type) VALUES ({user_id}, {group_id}, {tool_category}, {tool_type})"
-    else:
-        # 更新记录
-        sql = f"UPDATE user_equipment SET tool_type={tool_type}, equipped_time=CURRENT_TIMESTAMP WHERE uid={user_id} AND belonging_group={group_id} AND tool_category={tool_category}"
-    
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    conn.close()
-    
-    # 更新内存记录
-    if (group_id, user_id) not in equipped_tools:
-        equipped_tools[(group_id, user_id)] = {}
-    equipped_tools[(group_id, user_id)][tool_category] = tool_type
-    
-    # 构建回复消息
-    tool_type_names = ["铁质", "精金", "强化合金", "强化合金【不毁】"]
-    tool_category_names = ["镐", "锄", "斧"]
-    
-    message = f"装备成功！当前装备：{tool_type_names[tool_type]}{tool_category_names[tool_category]}"
-    
-    # 显示工具耐久度
-    if tool_type != TOOL_ALLOY_PERM:
-        message += f"（耐久度：{durability}）"
-    else:
-        message += "（无限耐久）"
-    
-    return message
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        sql = f"SELECT id FROM user_equipment WHERE uid={user_id} AND belonging_group={group_id} AND tool_category={tool_category}"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新记录
+            sql = f"INSERT INTO user_equipment (uid, belonging_group, tool_category, tool_type) VALUES ({user_id}, {group_id}, {tool_category}, {tool_type})"
+        else:
+            # 更新记录
+            sql = f"UPDATE user_equipment SET tool_type={tool_type}, equipped_time=CURRENT_TIMESTAMP WHERE uid={user_id} AND belonging_group={group_id} AND tool_category={tool_category}"
+        
+        cursor.execute(sql)
+        conn.commit()
+        
+        # 更新内存记录
+        if (group_id, user_id) not in equipped_tools:
+            equipped_tools[(group_id, user_id)] = {}
+        equipped_tools[(group_id, user_id)][tool_category] = tool_type
+        
+        # 更新缓存
+        cache_key = (group_id, user_id, tool_category)
+        with cache_lock:
+            equipment_cache[cache_key] = (tool_type, time.time())
+        
+        # 构建回复消息
+        tool_type_names = ["铁质", "精金", "强化合金", "强化合金【不毁】"]
+        tool_category_names = ["镐", "锄", "斧"]
+        
+        message = f"装备成功！当前装备：{tool_type_names[tool_type]}{tool_category_names[tool_category]}"
+        
+        # 显示工具耐久度
+        if tool_type != TOOL_ALLOY_PERM:
+            message += f"（耐久度：{durability}）"
+        else:
+            message += "（无限耐久）"
+        
+        return message
+    finally:
+        db_pool.return_connection(conn)
 
 def unequip_tool(group_id: int, user_id: int, tool_category: int) -> str:
     """卸下工具
@@ -173,25 +210,32 @@ def unequip_tool(group_id: int, user_id: int, tool_category: int) -> str:
     
     # 更新装备状态
     init_equipment_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 删除记录
-    sql = f"DELETE FROM user_equipment WHERE uid={user_id} AND belonging_group={group_id} AND tool_category={tool_category}"
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    conn.close()
-    
-    # 更新内存记录
-    if (group_id, user_id) in equipped_tools and tool_category in equipped_tools[(group_id, user_id)]:
-        del equipped_tools[(group_id, user_id)][tool_category]
-    
-    # 构建回复消息
-    tool_type_names = ["铁质", "精金", "强化合金", "强化合金【不毁】"]
-    tool_category_names = ["镐", "锄", "斧"]
-    
-    return f"卸下成功！已卸下{tool_type_names[current_tool_type]}{tool_category_names[tool_category]}"
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        # 删除记录
+        sql = f"DELETE FROM user_equipment WHERE uid={user_id} AND belonging_group={group_id} AND tool_category={tool_category}"
+        cursor.execute(sql)
+        conn.commit()
+        
+        # 更新内存记录
+        if (group_id, user_id) in equipped_tools and tool_category in equipped_tools[(group_id, user_id)]:
+            del equipped_tools[(group_id, user_id)][tool_category]
+        
+        # 更新缓存
+        cache_key = (group_id, user_id, tool_category)
+        with cache_lock:
+            if cache_key in equipment_cache:
+                del equipment_cache[cache_key]
+        
+        # 构建回复消息
+        tool_type_names = ["铁质", "精金", "强化合金", "强化合金【不毁】"]
+        tool_category_names = ["镐", "锄", "斧"]
+        
+        return f"卸下成功！已卸下{tool_type_names[current_tool_type]}{tool_category_names[tool_category]}"
+    finally:
+        db_pool.return_connection(conn)
 
 def get_equipment_info(group_id: int, user_id: int) -> str:
     """获取用户装备信息
@@ -255,3 +299,18 @@ def get_equipment_info(group_id: int, user_id: int) -> str:
     message += "- 强化合金工具：资源产量+50%\n"
     
     return message
+
+# 缓存清理函数
+def clear_equipment_cache():
+    """清理过期缓存"""
+    current_time = time.time()
+    with cache_lock:
+        expired_keys = [key for key, (_, timestamp) in equipment_cache.items() if current_time - timestamp > CACHE_EXPIRY]
+        for key in expired_keys:
+            del equipment_cache[key]
+
+# 定期清理缓存
+@scheduler.scheduled_job('cron', minute='*/10', id='clear_equipment_cache')
+async def schedule_clear_equipment_cache():
+    """每10分钟清理一次装备缓存"""
+    clear_equipment_cache()

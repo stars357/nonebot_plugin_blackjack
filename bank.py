@@ -2,7 +2,19 @@ import sqlite3
 import datetime
 import random
 import time
+import threading
 from typing import Dict, List, Tuple, Optional, Union
+
+# 导入数据库连接池
+from .game import db_pool
+
+# 用户状态缓存
+user_status_cache = {}
+user_balance_cache = {}
+cache_lock = threading.Lock()
+
+# 缓存过期时间（秒）
+CACHE_EXPIRY = 300
 
 # 状态常量
 STATUS_FREE = 0      # 自由状态
@@ -35,148 +47,194 @@ daily_bank_money: Dict[int, Dict[str, Union[float, str]]] = {}
 
 def init_bank_db():
     """初始化银行数据库"""
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 创建银行账户表
-    sql = """
-    CREATE TABLE IF NOT EXISTS bank_accounts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid INTEGER NOT NULL,
-        belonging_group INTEGER NOT NULL,
-        balance REAL NOT NULL DEFAULT 0,
-        UNIQUE(uid, belonging_group)
-    )
-    """
-    cursor.execute(sql)
-    
-    # 创建用户状态表
-    sql = """
-    CREATE TABLE IF NOT EXISTS user_status (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid INTEGER NOT NULL,
-        belonging_group INTEGER NOT NULL,
-        status INTEGER NOT NULL DEFAULT 0,  -- 0: 自由, 1: 监狱, 2: 通缉, 3: 医院
-        release_time TIMESTAMP,             -- 释放时间
-        UNIQUE(uid, belonging_group)
-    )
-    """
-    cursor.execute(sql)
-    
-    conn.commit()
-    cursor.close()
-    conn.close()
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        # 创建银行账户表
+        sql = """
+        CREATE TABLE IF NOT EXISTS bank_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid INTEGER NOT NULL,
+            belonging_group INTEGER NOT NULL,
+            balance REAL NOT NULL DEFAULT 0,
+            UNIQUE(uid, belonging_group)
+        )
+        """
+        cursor.execute(sql)
+        
+        # 创建用户状态表
+        sql = """
+        CREATE TABLE IF NOT EXISTS user_status (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid INTEGER NOT NULL,
+            belonging_group INTEGER NOT NULL,
+            status INTEGER NOT NULL DEFAULT 0,  -- 0: 自由, 1: 监狱, 2: 通缉, 3: 医院
+            release_time TIMESTAMP,             -- 释放时间
+            UNIQUE(uid, belonging_group)
+        )
+        """
+        cursor.execute(sql)
+        
+        conn.commit()
+    finally:
+        db_pool.return_connection(conn)
+
+# 初始化数据库
+init_bank_db()
 
 def get_bank_balance(group_id: int, user_id: int) -> float:
     """获取用户银行余额"""
-    init_bank_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
+    # 先检查缓存
+    cache_key = (group_id, user_id, "balance")
+    with cache_lock:
+        if cache_key in user_balance_cache:
+            return user_balance_cache[cache_key]
     
-    # 检查用户是否有银行账户，如果没有则创建
-    sql = f"SELECT balance FROM bank_accounts WHERE uid={user_id} AND belonging_group={group_id}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        # 创建新账户
-        sql = f"INSERT INTO bank_accounts (uid, belonging_group, balance) VALUES ({user_id}, {group_id}, 0)"
+    # 从数据库获取
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        # 检查用户是否有银行账户，如果没有则创建
+        sql = f"SELECT balance FROM bank_accounts WHERE uid={user_id} AND belonging_group={group_id}"
         cursor.execute(sql)
-        conn.commit()
-        balance = 0.0
-    else:
-        balance = float(result[0])
-    
-    cursor.close()
-    conn.close()
-    return balance
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新账户
+            sql = f"INSERT INTO bank_accounts (uid, belonging_group, balance) VALUES ({user_id}, {group_id}, 0)"
+            cursor.execute(sql)
+            conn.commit()
+            balance = 0.0
+        else:
+            balance = float(result[0])
+        
+        # 更新缓存
+        with cache_lock:
+            user_balance_cache[cache_key] = balance
+        
+        return balance
+    finally:
+        db_pool.return_connection(conn)
 
 def update_bank_balance(group_id: int, user_id: int, balance: float) -> None:
     """更新用户银行余额"""
-    init_bank_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 检查用户是否有银行账户，如果没有则创建
-    sql = f"SELECT balance FROM bank_accounts WHERE uid={user_id} AND belonging_group={group_id}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        # 创建新账户
-        sql = f"INSERT INTO bank_accounts (uid, belonging_group, balance) VALUES ({user_id}, {group_id}, {balance})"
-    else:
-        # 更新余额
-        sql = f"UPDATE bank_accounts SET balance={balance} WHERE uid={user_id} AND belonging_group={group_id}"
-    
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    conn.close()
+    # 更新数据库
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        # 检查用户是否有银行账户，如果没有则创建
+        sql = f"SELECT balance FROM bank_accounts WHERE uid={user_id} AND belonging_group={group_id}"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新账户
+            sql = f"INSERT INTO bank_accounts (uid, belonging_group, balance) VALUES ({user_id}, {group_id}, {balance})"
+        else:
+            # 更新余额
+            sql = f"UPDATE bank_accounts SET balance={balance} WHERE uid={user_id} AND belonging_group={group_id}"
+        
+        cursor.execute(sql)
+        conn.commit()
+        
+        # 更新缓存
+        cache_key = (group_id, user_id, "balance")
+        with cache_lock:
+            user_balance_cache[cache_key] = balance
+    finally:
+        db_pool.return_connection(conn)
 
 def get_user_status(group_id: int, user_id: int) -> Tuple[int, Optional[datetime.datetime]]:
     """获取用户状态和释放时间"""
-    init_bank_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
+    # 先检查缓存
+    cache_key = (group_id, user_id, "status")
+    with cache_lock:
+        if cache_key in user_status_cache:
+            status, release_time = user_status_cache[cache_key]
+            # 检查是否已经过了释放时间
+            if release_time and datetime.datetime.now() > release_time:
+                # 自动释放
+                status = STATUS_FREE
+                release_time = None
+                # 更新缓存
+                user_status_cache[cache_key] = (status, release_time)
+            return status, release_time
     
-    # 检查用户状态
-    sql = f"SELECT status, release_time FROM user_status WHERE uid={user_id} AND belonging_group={group_id}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        # 创建新状态记录
-        sql = f"INSERT INTO user_status (uid, belonging_group, status) VALUES ({user_id}, {group_id}, {STATUS_FREE})"
-        cursor.execute(sql)
-        conn.commit()
-        status = STATUS_FREE
-        release_time = None
-    else:
-        status = result[0]
-        release_time = datetime.datetime.fromisoformat(result[1]) if result[1] else None
+    # 从数据库获取
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
         
-        # 检查是否已经过了释放时间
-        if release_time and datetime.datetime.now() > release_time:
-            # 自动释放（监狱、医院和通缉状态）
-            sql = f"UPDATE user_status SET status={STATUS_FREE}, release_time=NULL WHERE uid={user_id} AND belonging_group={group_id}"
+        # 检查用户状态
+        sql = f"SELECT status, release_time FROM user_status WHERE uid={user_id} AND belonging_group={group_id}"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新状态记录
+            sql = f"INSERT INTO user_status (uid, belonging_group, status) VALUES ({user_id}, {group_id}, {STATUS_FREE})"
             cursor.execute(sql)
             conn.commit()
             status = STATUS_FREE
             release_time = None
+        else:
+            status = result[0]
+            release_time = datetime.datetime.fromisoformat(result[1]) if result[1] else None
             
-            # 如果是通缉状态，清除通缉记录
-            if status == STATUS_WANTED and (group_id, user_id) in wanted_status:
-                del wanted_status[(group_id, user_id)]
-    
-    cursor.close()
-    conn.close()
-    return status, release_time
+            # 检查是否已经过了释放时间
+            if release_time and datetime.datetime.now() > release_time:
+                # 自动释放（监狱、医院和通缉状态）
+                sql = f"UPDATE user_status SET status={STATUS_FREE}, release_time=NULL WHERE uid={user_id} AND belonging_group={group_id}"
+                cursor.execute(sql)
+                conn.commit()
+                status = STATUS_FREE
+                release_time = None
+                
+                # 如果是通缉状态，清除通缉记录
+                if status == STATUS_WANTED and (group_id, user_id) in wanted_status:
+                    del wanted_status[(group_id, user_id)]
+        
+        # 更新缓存
+        with cache_lock:
+            user_status_cache[cache_key] = (status, release_time)
+        
+        return status, release_time
+    finally:
+        db_pool.return_connection(conn)
 
 def update_user_status(group_id: int, user_id: int, status: int, release_time: Optional[datetime.datetime] = None) -> None:
     """更新用户状态"""
-    init_bank_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 检查用户是否有状态记录
-    sql = f"SELECT id FROM user_status WHERE uid={user_id} AND belonging_group={group_id}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    release_time_str = f"'{release_time.isoformat()}'" if release_time else "NULL"
-    
-    if result is None:
-        # 创建新状态记录
-        sql = f"INSERT INTO user_status (uid, belonging_group, status, release_time) VALUES ({user_id}, {group_id}, {status}, {release_time_str})"
-    else:
-        # 更新状态
-        sql = f"UPDATE user_status SET status={status}, release_time={release_time_str} WHERE uid={user_id} AND belonging_group={group_id}"
-    
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    conn.close()
+    # 更新数据库
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        # 检查用户是否有状态记录
+        sql = f"SELECT id FROM user_status WHERE uid={user_id} AND belonging_group={group_id}"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        release_time_str = f"'{release_time.isoformat()}'" if release_time else "NULL"
+        
+        if result is None:
+            # 创建新状态记录
+            sql = f"INSERT INTO user_status (uid, belonging_group, status, release_time) VALUES ({user_id}, {group_id}, {status}, {release_time_str})"
+        else:
+            # 更新状态
+            sql = f"UPDATE user_status SET status={status}, release_time={release_time_str} WHERE uid={user_id} AND belonging_group={group_id}"
+        
+        cursor.execute(sql)
+        conn.commit()
+        
+        # 更新缓存
+        cache_key = (group_id, user_id, "status")
+        with cache_lock:
+            user_status_cache[cache_key] = (status, release_time)
+    finally:
+        db_pool.return_connection(conn)
 
 def check_operation_allowed(group_id: int, user_id: int, allow_prison: bool = False, allow_hospital: bool = False, allow_wanted: bool = False) -> Tuple[bool, str]:
     """检查用户是否可以执行操作"""
@@ -198,6 +256,21 @@ def check_operation_allowed(group_id: int, user_id: int, allow_prison: bool = Fa
         return False, "你正处于通缉状态，无法执行此操作"
     
     return True, ""
+
+# 定期清理缓存的函数
+def clear_cache():
+    with cache_lock:
+        user_status_cache.clear()
+        user_balance_cache.clear()
+
+# 导入定时器
+import asyncio
+
+# 定期清理缓存（每5分钟）
+async def schedule_cache_clear():
+    while True:
+        await asyncio.sleep(300)
+        clear_cache()
 
 def deposit(group_id: int, user_id: int, amount: float) -> str:
     """存款操作"""

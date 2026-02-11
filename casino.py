@@ -2,9 +2,11 @@ import sqlite3
 import datetime
 import random
 import time
+import threading
 from typing import Dict, List, Tuple, Optional, Union
+from nonebot_plugin_apscheduler import scheduler
 from .card import Card
-from .game import Deck
+from .game import Deck, db_pool
 from .sign import get_point, update_point
 from .bank import get_bank_balance, update_bank_balance, update_user_status, STATUS_HOSPITAL
 
@@ -23,225 +25,295 @@ blackjack_games: Dict[Tuple[int, int], Dict] = {}
 # 存储BlackJackGame对象的字典 {(group_id, user_id): BlackJackGame} - 存储进行中的新版21点游戏，直接与用户ID绑定
 blackjack_game_objects: Dict[Tuple[int, int], 'BlackJackGame'] = {}
 
+# 缓存字典
+chip_rate_cache: Dict[Tuple[int, int], Tuple[float, float]] = {}  # {(group_id, date): (rate, timestamp)}
+casino_pool_cache: Dict[Tuple[int, int], Tuple[float, float]] = {}  # {(group_id, date): (pool_amount, timestamp)}
+user_chips_cache: Dict[Tuple[int, int], Tuple[float, float]] = {}  # {(group_id, user_id): (chips, timestamp)}
+
+# 缓存锁
+cache_lock = threading.Lock()
+
+# 缓存过期时间（秒）
+CACHE_EXPIRY = 300
+
 def init_casino_db():
     """初始化赌场数据库"""
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 创建筹码表
-    sql = """
-    CREATE TABLE IF NOT EXISTS casino_chips (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid INTEGER NOT NULL,
-        belonging_group INTEGER NOT NULL,
-        chips REAL NOT NULL DEFAULT 0,
-        UNIQUE(uid, belonging_group)
-    )
-    """
-    cursor.execute(sql)
-    
-    # 创建赌场奖池表
-    sql = """
-    CREATE TABLE IF NOT EXISTS casino_pool (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        belonging_group INTEGER NOT NULL,
-        pool_amount REAL NOT NULL DEFAULT 1000000,
-        last_refresh DATE,
-        UNIQUE(belonging_group)
-    )
-    """
-    cursor.execute(sql)
-    
-    # 创建筹码价格表
-    sql = """
-    CREATE TABLE IF NOT EXISTS chip_rate (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        belonging_group INTEGER NOT NULL,
-        rate REAL NOT NULL DEFAULT 1.0,
-        last_update DATE,
-        UNIQUE(belonging_group)
-    )
-    """
-    cursor.execute(sql)
-    
-    # 创建赌场记录表
-    sql = """
-    CREATE TABLE IF NOT EXISTS casino_records (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid INTEGER NOT NULL,
-        belonging_group INTEGER NOT NULL,
-        game_type TEXT NOT NULL,
-        bet_amount REAL NOT NULL,
-        win_amount REAL NOT NULL,
-        game_result TEXT NOT NULL,
-        game_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    """
-    cursor.execute(sql)
-    
-    # 创建赌场惩罚表
-    sql = """
-    CREATE TABLE IF NOT EXISTS casino_punishment (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid INTEGER NOT NULL,
-        belonging_group INTEGER NOT NULL,
-        end_time TIMESTAMP NOT NULL,
-        UNIQUE(uid, belonging_group)
-    )
-    """
-    cursor.execute(sql)
-    
-    conn.commit()
-    cursor.close()
-    conn.close()
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        # 创建筹码表
+        sql = """
+        CREATE TABLE IF NOT EXISTS casino_chips (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid INTEGER NOT NULL,
+            belonging_group INTEGER NOT NULL,
+            chips REAL NOT NULL DEFAULT 0,
+            UNIQUE(uid, belonging_group)
+        )
+        """
+        cursor.execute(sql)
+        
+        # 创建赌场奖池表
+        sql = """
+        CREATE TABLE IF NOT EXISTS casino_pool (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            belonging_group INTEGER NOT NULL,
+            pool_amount REAL NOT NULL DEFAULT 1000000,
+            last_refresh DATE,
+            UNIQUE(belonging_group)
+        )
+        """
+        cursor.execute(sql)
+        
+        # 创建筹码价格表
+        sql = """
+        CREATE TABLE IF NOT EXISTS chip_rate (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            belonging_group INTEGER NOT NULL,
+            rate REAL NOT NULL DEFAULT 1.0,
+            last_update DATE,
+            UNIQUE(belonging_group)
+        )
+        """
+        cursor.execute(sql)
+        
+        # 创建赌场记录表
+        sql = """
+        CREATE TABLE IF NOT EXISTS casino_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid INTEGER NOT NULL,
+            belonging_group INTEGER NOT NULL,
+            game_type TEXT NOT NULL,
+            bet_amount REAL NOT NULL,
+            win_amount REAL NOT NULL,
+            game_result TEXT NOT NULL,
+            game_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+        cursor.execute(sql)
+        
+        # 创建赌场惩罚表
+        sql = """
+        CREATE TABLE IF NOT EXISTS casino_punishment (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid INTEGER NOT NULL,
+            belonging_group INTEGER NOT NULL,
+            end_time TIMESTAMP NOT NULL,
+            UNIQUE(uid, belonging_group)
+        )
+        """
+        cursor.execute(sql)
+        
+        conn.commit()
+    finally:
+        db_pool.return_connection(conn)
 
 def get_chip_rate(group_id: int) -> float:
     """获取当前筹码兑换比率"""
     init_casino_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 检查是否已有记录
-    sql = f"SELECT rate, last_update FROM chip_rate WHERE belonging_group={group_id}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
     today = datetime.date.today().isoformat()
     
-    if result is None:
-        # 创建新记录，默认比率为1.0
-        rate = 1.0
-        sql = f"INSERT INTO chip_rate (belonging_group, rate, last_update) VALUES ({group_id}, {rate}, '{today}')"
-        cursor.execute(sql)
-        conn.commit()
-    else:
-        rate, last_update = result
-        rate = float(rate)
+    # 检查缓存
+    cache_key = (group_id, today)
+    with cache_lock:
+        if cache_key in chip_rate_cache:
+            rate, timestamp = chip_rate_cache[cache_key]
+            if time.time() - timestamp < CACHE_EXPIRY:
+                # 更新内存中的价格
+                chip_rate[group_id] = rate
+                return rate
+    
+    # 从数据库获取
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
         
-        # 检查是否需要更新价格（每天更新一次）
-        if last_update != today:
-            # 随机波动15%
-            fluctuation = random.uniform(-0.15, 0.15)
-            # 在计算过程中就保留两位小数，确保精度一致
-            rate = round(max(0.5, min(1.5, round(rate * (1 + fluctuation), 2))), 2)  # 限制在0.5-1.5之间，保留两位小数
-            
-            # 更新数据库
-            sql = f"UPDATE chip_rate SET rate={rate}, last_update='{today}' WHERE belonging_group={group_id}"
+        # 检查是否已有记录
+        sql = f"SELECT rate, last_update FROM chip_rate WHERE belonging_group={group_id}"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新记录，默认比率为1.0
+            rate = 1.0
+            sql = f"INSERT INTO chip_rate (belonging_group, rate, last_update) VALUES ({group_id}, {rate}, '{today}')"
             cursor.execute(sql)
             conn.commit()
-    
-    cursor.close()
-    conn.close()
-    
-    # 更新内存中的价格
-    chip_rate[group_id] = rate
-    
-    return rate
+        else:
+            rate, last_update = result
+            rate = float(rate)
+            
+            # 检查是否需要更新价格（每天更新一次）
+            if last_update != today:
+                # 随机波动15%
+                fluctuation = random.uniform(-0.15, 0.15)
+                # 在计算过程中就保留两位小数，确保精度一致
+                rate = round(max(0.5, min(1.5, round(rate * (1 + fluctuation), 2))), 2)  # 限制在0.5-1.5之间，保留两位小数
+                
+                # 更新数据库
+                sql = f"UPDATE chip_rate SET rate={rate}, last_update='{today}' WHERE belonging_group={group_id}"
+                cursor.execute(sql)
+                conn.commit()
+        
+        # 更新缓存
+        with cache_lock:
+            chip_rate_cache[cache_key] = (rate, time.time())
+        
+        # 更新内存中的价格
+        chip_rate[group_id] = rate
+        
+        return rate
+    finally:
+        db_pool.return_connection(conn)
 
 def get_casino_pool(group_id: int) -> float:
     """获取赌场奖池金额"""
     init_casino_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 检查是否已有记录
-    sql = f"SELECT pool_amount, last_refresh FROM casino_pool WHERE belonging_group={group_id}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
     today = datetime.date.today().isoformat()
     
-    if result is None:
-        # 创建新记录，默认奖池为100万
-        pool_amount = 1000000.0
-        sql = f"INSERT INTO casino_pool (belonging_group, pool_amount, last_refresh) VALUES ({group_id}, {pool_amount}, '{today}')"
-        cursor.execute(sql)
-        conn.commit()
-    else:
-        pool_amount, last_refresh = result
-        pool_amount = float(pool_amount)
+    # 检查缓存
+    cache_key = (group_id, today)
+    with cache_lock:
+        if cache_key in casino_pool_cache:
+            pool_amount, timestamp = casino_pool_cache[cache_key]
+            if time.time() - timestamp < CACHE_EXPIRY:
+                # 更新内存中的奖池
+                casino_pool[group_id] = pool_amount
+                return pool_amount
+    
+    # 从数据库获取
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
         
-        # 检查是否需要刷新奖池（每天第一次查询且金额小于100万时刷新）
-        if last_refresh != today and pool_amount < 1000000:
+        # 检查是否已有记录
+        sql = f"SELECT pool_amount, last_refresh FROM casino_pool WHERE belonging_group={group_id}"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新记录，默认奖池为100万
             pool_amount = 1000000.0
-            sql = f"UPDATE casino_pool SET pool_amount={pool_amount}, last_refresh='{today}' WHERE belonging_group={group_id}"
+            sql = f"INSERT INTO casino_pool (belonging_group, pool_amount, last_refresh) VALUES ({group_id}, {pool_amount}, '{today}')"
             cursor.execute(sql)
             conn.commit()
-    
-    cursor.close()
-    conn.close()
-    
-    # 更新内存中的奖池
-    casino_pool[group_id] = pool_amount
-    
-    return pool_amount
+        else:
+            pool_amount, last_refresh = result
+            pool_amount = float(pool_amount)
+            
+            # 检查是否需要刷新奖池（每天第一次查询且金额小于100万时刷新）
+            if last_refresh != today and pool_amount < 1000000:
+                pool_amount = 1000000.0
+                sql = f"UPDATE casino_pool SET pool_amount={pool_amount}, last_refresh='{today}' WHERE belonging_group={group_id}"
+                cursor.execute(sql)
+                conn.commit()
+        
+        # 更新缓存
+        with cache_lock:
+            casino_pool_cache[cache_key] = (pool_amount, time.time())
+        
+        # 更新内存中的奖池
+        casino_pool[group_id] = pool_amount
+        
+        return pool_amount
+    finally:
+        db_pool.return_connection(conn)
 
 def update_casino_pool(group_id: int, amount: float) -> None:
     """更新赌场奖池金额"""
     init_casino_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 获取当前奖池金额
-    current_pool = get_casino_pool(group_id)
-    new_pool = max(0, current_pool + amount)  # 确保奖池不会为负
-    
-    # 更新数据库
-    sql = f"UPDATE casino_pool SET pool_amount={new_pool} WHERE belonging_group={group_id}"
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    conn.close()
-    
-    # 更新内存中的奖池
-    casino_pool[group_id] = new_pool
+    conn = db_pool.get_connection()
+    try:
+        # 获取当前奖池金额
+        current_pool = get_casino_pool(group_id)
+        new_pool = max(0, current_pool + amount)  # 确保奖池不会为负
+        
+        # 更新数据库
+        cursor = conn.cursor()
+        sql = f"UPDATE casino_pool SET pool_amount={new_pool} WHERE belonging_group={group_id}"
+        cursor.execute(sql)
+        conn.commit()
+        
+        # 更新内存中的奖池
+        casino_pool[group_id] = new_pool
+        
+        # 清除缓存
+        today = datetime.date.today().isoformat()
+        cache_key = (group_id, today)
+        with cache_lock:
+            if cache_key in casino_pool_cache:
+                del casino_pool_cache[cache_key]
+    finally:
+        db_pool.return_connection(conn)
 
 def get_user_chips(group_id: int, user_id: int) -> float:
     """获取用户筹码数量"""
     init_casino_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
     
-    # 检查用户是否有筹码记录
-    sql = f"SELECT chips FROM casino_chips WHERE uid={user_id} AND belonging_group={group_id}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
+    # 检查缓存
+    cache_key = (group_id, user_id)
+    with cache_lock:
+        if cache_key in user_chips_cache:
+            chips, timestamp = user_chips_cache[cache_key]
+            if time.time() - timestamp < CACHE_EXPIRY:
+                return chips
     
-    if result is None:
-        # 创建新记录
-        sql = f"INSERT INTO casino_chips (uid, belonging_group, chips) VALUES ({user_id}, {group_id}, 0)"
+    # 从数据库获取
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        # 检查用户是否有筹码记录
+        sql = f"SELECT chips FROM casino_chips WHERE uid={user_id} AND belonging_group={group_id}"
         cursor.execute(sql)
-        conn.commit()
-        chips = 0.0
-    else:
-        chips = float(result[0])
-    
-    cursor.close()
-    conn.close()
-    return chips
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新记录
+            sql = f"INSERT INTO casino_chips (uid, belonging_group, chips) VALUES ({user_id}, {group_id}, 0)"
+            cursor.execute(sql)
+            conn.commit()
+            chips = 0.0
+        else:
+            chips = float(result[0])
+        
+        # 更新缓存
+        with cache_lock:
+            user_chips_cache[cache_key] = (chips, time.time())
+        
+        return chips
+    finally:
+        db_pool.return_connection(conn)
 
 def update_user_chips(group_id: int, user_id: int, chips: float) -> None:
     """更新用户筹码数量"""
     init_casino_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 检查用户是否有筹码记录
-    sql = f"SELECT id FROM casino_chips WHERE uid={user_id} AND belonging_group={group_id}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        # 创建新记录
-        sql = f"INSERT INTO casino_chips (uid, belonging_group, chips) VALUES ({user_id}, {group_id}, {chips})"
-    else:
-        # 更新记录
-        sql = f"UPDATE casino_chips SET chips={chips} WHERE uid={user_id} AND belonging_group={group_id}"
-    
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    conn.close()
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        # 检查用户是否有筹码记录
+        sql = f"SELECT id FROM casino_chips WHERE uid={user_id} AND belonging_group={group_id}"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新记录
+            sql = f"INSERT INTO casino_chips (uid, belonging_group, chips) VALUES ({user_id}, {group_id}, {chips})"
+        else:
+            # 更新记录
+            sql = f"UPDATE casino_chips SET chips={chips} WHERE uid={user_id} AND belonging_group={group_id}"
+        
+        cursor.execute(sql)
+        conn.commit()
+        
+        # 更新缓存
+        cache_key = (group_id, user_id)
+        with cache_lock:
+            user_chips_cache[cache_key] = (chips, time.time())
+    finally:
+        db_pool.return_connection(conn)
 
 def check_casino_punishment(group_id: int, user_id: int) -> Tuple[bool, str]:
     """检查用户是否处于赌场惩罚状态"""
@@ -260,40 +332,63 @@ def check_casino_punishment(group_id: int, user_id: int) -> Tuple[bool, str]:
     
     # 检查数据库
     init_casino_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    sql = f"SELECT end_time FROM casino_punishment WHERE uid={user_id} AND belonging_group={group_id}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        # 没有惩罚记录
-        cursor.close()
-        conn.close()
-        return True, ""
-    else:
-        end_time = datetime.datetime.fromisoformat(result[0])
-        if datetime.datetime.now() < end_time:
-            # 仍在惩罚期内
-            remaining = end_time - datetime.datetime.now()
-            hours = remaining.seconds // 3600
-            minutes = (remaining.seconds % 3600) // 60
-            
-            # 更新内存记录
-            casino_punishment[(group_id, user_id)] = end_time
-            
-            cursor.close()
-            conn.close()
-            return False, f"你因为赌场欠债被惩罚中，还有{hours}小时{minutes}分钟才能进行赌场相关操作"
-        else:
-            # 惩罚已结束，删除记录
-            sql = f"DELETE FROM casino_punishment WHERE uid={user_id} AND belonging_group={group_id}"
-            cursor.execute(sql)
-            conn.commit()
-            cursor.close()
-            conn.close()
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        sql = f"SELECT end_time FROM casino_punishment WHERE uid={user_id} AND belonging_group={group_id}"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 没有惩罚记录
             return True, ""
+        else:
+            end_time = datetime.datetime.fromisoformat(result[0])
+            if datetime.datetime.now() < end_time:
+                # 仍在惩罚期内
+                remaining = end_time - datetime.datetime.now()
+                hours = remaining.seconds // 3600
+                minutes = (remaining.seconds % 3600) // 60
+                
+                # 更新内存记录
+                casino_punishment[(group_id, user_id)] = end_time
+                
+                return False, f"你因为赌场欠债被惩罚中，还有{hours}小时{minutes}分钟才能进行赌场相关操作"
+            else:
+                # 惩罚已结束，删除记录
+                sql = f"DELETE FROM casino_punishment WHERE uid={user_id} AND belonging_group={group_id}"
+                cursor.execute(sql)
+                conn.commit()
+                return True, ""
+    finally:
+        db_pool.return_connection(conn)
+
+# 缓存清理函数
+def clear_casino_cache():
+    """清理过期缓存"""
+    current_time = time.time()
+    with cache_lock:
+        # 清理筹码兑换率缓存
+        expired_keys = [key for key, (_, timestamp) in chip_rate_cache.items() if current_time - timestamp > CACHE_EXPIRY]
+        for key in expired_keys:
+            del chip_rate_cache[key]
+        
+        # 清理赌场奖池缓存
+        expired_keys = [key for key, (_, timestamp) in casino_pool_cache.items() if current_time - timestamp > CACHE_EXPIRY]
+        for key in expired_keys:
+            del casino_pool_cache[key]
+        
+        # 清理用户筹码缓存
+        expired_keys = [key for key, (_, timestamp) in user_chips_cache.items() if current_time - timestamp > CACHE_EXPIRY]
+        for key in expired_keys:
+            del user_chips_cache[key]
+
+# 定期清理缓存
+@scheduler.scheduled_job('cron', minute='*/10', id='clear_casino_cache')
+async def schedule_clear_casino_cache():
+    """每10分钟清理一次赌场缓存"""
+    clear_casino_cache()
 
 def apply_casino_punishment(group_id: int, user_id: int) -> None:
     """对用户应用赌场惩罚"""
