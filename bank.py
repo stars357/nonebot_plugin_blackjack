@@ -3,6 +3,8 @@ import random
 import time
 from typing import Dict, List, Tuple, Optional, Union
 from db import db_tool
+from cache import cache_manager
+
 
 INTEREST_RATE_DAILY_MIN = 0.00005
 INTEREST_RATE_DAILY_MAX = 0.00030
@@ -146,16 +148,25 @@ def get_interest_rate_info(group_id: int, date: Optional[datetime.date] = None) 
         date = datetime.date.today()
     date_str = date.isoformat()
     
+    # 尝试从缓存获取
+    cache_key = ("interest_rate", group_id, date_str)
+    hit, cached_value = cache_manager.get_cached_value("bank", cache_key)
+    if hit:
+        return cached_value
+    
     # 检查是否已有今日利率
     sql = "SELECT rate, event FROM bank_interest_rates WHERE belonging_group=? AND date=?"
     result = db_tool.execute_one(sql, (group_id, date_str))
     if result is not None:
-        return float(result[0]), result[1]
+        rate, event = float(result[0]), result[1]
+    else:
+        # 生成新利率
+        rate, event = _generate_daily_interest_rate()
+        sql = "INSERT INTO bank_interest_rates (belonging_group, date, rate, event) VALUES (?, ?, ?, ?)"
+        db_tool.execute_update(sql, (group_id, date_str, rate, event))
     
-    # 生成新利率
-    rate, event = _generate_daily_interest_rate()
-    sql = "INSERT INTO bank_interest_rates (belonging_group, date, rate, event) VALUES (?, ?, ?, ?)"
-    db_tool.execute_update(sql, (group_id, date_str, rate, event))
+    # 存入缓存
+    cache_manager.set_cached_value("bank", cache_key, (rate, event))
     return rate, event
 
 
@@ -223,10 +234,19 @@ def get_bank_balance(group_id: int, user_id: int) -> float:
     # 应用利息
     _apply_interest_if_needed(group_id, user_id)
     
+    # 尝试从缓存获取
+    cache_key = ("balance", group_id, user_id)
+    hit, cached_value = cache_manager.get_cached_value("bank", cache_key)
+    if hit:
+        return cached_value
+    
     # 获取余额
     sql = "SELECT balance FROM bank_accounts WHERE uid=? AND belonging_group=?"
     result = db_tool.execute_one(sql, (user_id, group_id))
     balance = float(result[0]) if result else 0.0
+    
+    # 存入缓存
+    cache_manager.set_cached_value("bank", cache_key, balance)
     return balance
 
 def update_bank_balance(group_id: int, user_id: int, balance: float) -> None:
@@ -240,10 +260,37 @@ def update_bank_balance(group_id: int, user_id: int, balance: float) -> None:
     balance = round(float(balance), 2)
     sql = "UPDATE bank_accounts SET balance=? WHERE uid=? AND belonging_group=?"
     db_tool.execute_update(sql, (balance, user_id, group_id))
+    
+    # 清除缓存
+    cache_key = ("balance", group_id, user_id)
+    # 直接清除缓存项（由于缓存管理器没有提供删除单个缓存项的方法，我们通过设置过期值来模拟）
+    # 或者可以考虑在缓存管理器中添加删除方法，但为了保持兼容性，这里使用设置过期值的方式
+    cache_manager.set_cached_value("bank", cache_key, balance)
 
 def get_user_status(group_id: int, user_id: int) -> Tuple[int, Optional[datetime.datetime]]:
     """获取用户状态和释放时间"""
     init_bank_db()
+    
+    # 尝试从缓存获取
+    cache_key = ("user_status", group_id, user_id)
+    hit, cached_value = cache_manager.get_cached_value("bank", cache_key)
+    if hit:
+        status, release_time = cached_value
+        # 检查是否已经过了释放时间
+        if release_time and datetime.datetime.now() > release_time:
+            # 自动释放（监狱、医院和通缉状态）
+            sql = "UPDATE user_status SET status=?, release_time=NULL WHERE uid=? AND belonging_group=?"
+            db_tool.execute_update(sql, (STATUS_FREE, user_id, group_id))
+            status = STATUS_FREE
+            release_time = None
+            
+            # 如果是通缉状态，清除通缉记录
+            if status == STATUS_WANTED and (group_id, user_id) in wanted_status:
+                del wanted_status[(group_id, user_id)]
+            
+            # 更新缓存
+            cache_manager.set_cached_value("bank", cache_key, (status, release_time))
+        return status, release_time
     
     # 检查用户状态
     sql = "SELECT status, release_time FROM user_status WHERE uid=? AND belonging_group=?"
@@ -271,6 +318,8 @@ def get_user_status(group_id: int, user_id: int) -> Tuple[int, Optional[datetime
             if status == STATUS_WANTED and (group_id, user_id) in wanted_status:
                 del wanted_status[(group_id, user_id)]
     
+    # 存入缓存
+    cache_manager.set_cached_value("bank", cache_key, (status, release_time))
     return status, release_time
 
 def update_user_status(group_id: int, user_id: int, status: int, release_time: Optional[datetime.datetime] = None) -> None:
@@ -289,6 +338,10 @@ def update_user_status(group_id: int, user_id: int, status: int, release_time: O
         # 更新状态
         sql = "UPDATE user_status SET status=?, release_time=? WHERE uid=? AND belonging_group=?"
         db_tool.execute_update(sql, (status, release_time.isoformat() if release_time else None, user_id, group_id))
+    
+    # 更新缓存
+    cache_key = ("user_status", group_id, user_id)
+    cache_manager.set_cached_value("bank", cache_key, (status, release_time))
 
 def check_operation_allowed(group_id: int, user_id: int, allow_prison: bool = False, allow_hospital: bool = False, allow_wanted: bool = False) -> Tuple[bool, str]:
     """检查用户是否可以执行操作"""
