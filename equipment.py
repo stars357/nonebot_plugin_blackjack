@@ -9,8 +9,8 @@ from .common import (
 )
 from .profession import get_tool_durability, update_tool_durability
 
-# 导入公共数据库连接池
-from .db import db_pool
+# 导入公共数据库工具
+from .db import db_tool
 
 # 导入公共缓存模块
 from .cache import cache_manager
@@ -20,27 +20,19 @@ equipped_tools: Dict[Tuple[int, int], Dict[int, int]] = {}
 
 def init_equipment_db():
     """初始化装备系统数据库"""
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        
-        # 创建用户装备表
-        sql = """
-        CREATE TABLE IF NOT EXISTS user_equipment (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            uid INTEGER NOT NULL,
-            belonging_group INTEGER NOT NULL,
-            tool_category INTEGER NOT NULL, -- 0: 镐, 1: 锄, 2: 斧
-            tool_type INTEGER NOT NULL,     -- 0: 铁质工具, 1: 精金工具, 2: 强化合金工具, 3: 强化合金工具【不毁】
-            equipped_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(uid, belonging_group, tool_category)
-        )
-        """
-        cursor.execute(sql)
-        
-        conn.commit()
-    finally:
-        db_pool.return_connection(conn)
+    # 创建用户装备表
+    sql = """
+    CREATE TABLE IF NOT EXISTS user_equipment (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uid INTEGER NOT NULL,
+        belonging_group INTEGER NOT NULL,
+        tool_category INTEGER NOT NULL, -- 0: 镐, 1: 锄, 2: 斧
+        tool_type INTEGER NOT NULL,     -- 0: 铁质工具, 1: 精金工具, 2: 强化合金工具, 3: 强化合金工具【不毁】
+        equipped_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(uid, belonging_group, tool_category)
+    )
+    """
+    db_tool.execute_update(sql)
 
 def get_equipped_tool(group_id: int, user_id: int, tool_category: int) -> int:
     """获取用户当前装备的工具类型
@@ -70,31 +62,24 @@ def get_equipped_tool(group_id: int, user_id: int, tool_category: int) -> int:
     
     # 从数据库查询
     init_equipment_db()
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
+    sql = f"SELECT tool_type FROM user_equipment WHERE uid={user_id} AND belonging_group={group_id} AND tool_category={tool_category}"
+    result = db_tool.execute_query(sql)
+    
+    if not result:
+        # 未装备工具
+        tool_type = -1
+    else:
+        tool_type = result[0][0]
         
-        sql = f"SELECT tool_type FROM user_equipment WHERE uid={user_id} AND belonging_group={group_id} AND tool_category={tool_category}"
-        cursor.execute(sql)
-        result = cursor.fetchone()
-        
-        if result is None:
-            # 未装备工具
-            tool_type = -1
-        else:
-            tool_type = result[0]
-            
-            # 更新内存记录
-            if (group_id, user_id) not in equipped_tools:
-                equipped_tools[(group_id, user_id)] = {}
-            equipped_tools[(group_id, user_id)][tool_category] = tool_type
-        
-        # 更新缓存
-        cache_manager.set_cached_value(cache_key, tool_type)
-        
-        return tool_type
-    finally:
-        db_pool.return_connection(conn)
+        # 更新内存记录
+        if (group_id, user_id) not in equipped_tools:
+            equipped_tools[(group_id, user_id)] = {}
+        equipped_tools[(group_id, user_id)][tool_category] = tool_type
+    
+    # 更新缓存
+    cache_manager.set_cached_value(cache_key, tool_type)
+    
+    return tool_type
 
 def equip_tool(group_id: int, user_id: int, tool_type: int, tool_category: int) -> str:
     """装备工具
@@ -134,48 +119,40 @@ def equip_tool(group_id: int, user_id: int, tool_type: int, tool_category: int) 
     
     # 更新装备状态
     init_equipment_db()
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        
-        sql = f"SELECT id FROM user_equipment WHERE uid={user_id} AND belonging_group={group_id} AND tool_category={tool_category}"
-        cursor.execute(sql)
-        result = cursor.fetchone()
-        
-        if result is None:
-            # 创建新记录
-            sql = f"INSERT INTO user_equipment (uid, belonging_group, tool_category, tool_type) VALUES ({user_id}, {group_id}, {tool_category}, {tool_type})"
-        else:
-            # 更新记录
-            sql = f"UPDATE user_equipment SET tool_type={tool_type}, equipped_time=CURRENT_TIMESTAMP WHERE uid={user_id} AND belonging_group={group_id} AND tool_category={tool_category}"
-        
-        cursor.execute(sql)
-        conn.commit()
-        
-        # 更新内存记录
-        if (group_id, user_id) not in equipped_tools:
-            equipped_tools[(group_id, user_id)] = {}
-        equipped_tools[(group_id, user_id)][tool_category] = tool_type
-        
-        # 更新缓存
-        cache_key = f"equipment_{group_id}_{user_id}_{tool_category}"
-        cache_manager.set_cached_value(cache_key, tool_type)
-        
-        # 构建回复消息
-        tool_type_names = ["铁质", "精金", "强化合金", "强化合金【不毁】"]
-        tool_category_names = ["镐", "锄", "斧"]
-        
-        message = f"装备成功！当前装备：{tool_type_names[tool_type]}{tool_category_names[tool_category]}"
-        
-        # 显示工具耐久度
-        if tool_type != TOOL_ALLOY_PERM:
-            message += f"（耐久度：{durability}）"
-        else:
-            message += "（无限耐久）"
-        
-        return message
-    finally:
-        db_pool.return_connection(conn)
+    sql = f"SELECT id FROM user_equipment WHERE uid={user_id} AND belonging_group={group_id} AND tool_category={tool_category}"
+    result = db_tool.execute_query(sql)
+    
+    if not result:
+        # 创建新记录
+        sql = f"INSERT INTO user_equipment (uid, belonging_group, tool_category, tool_type) VALUES ({user_id}, {group_id}, {tool_category}, {tool_type})"
+    else:
+        # 更新记录
+        sql = f"UPDATE user_equipment SET tool_type={tool_type}, equipped_time=CURRENT_TIMESTAMP WHERE uid={user_id} AND belonging_group={group_id} AND tool_category={tool_category}"
+    
+    db_tool.execute_update(sql)
+    
+    # 更新内存记录
+    if (group_id, user_id) not in equipped_tools:
+        equipped_tools[(group_id, user_id)] = {}
+    equipped_tools[(group_id, user_id)][tool_category] = tool_type
+    
+    # 更新缓存
+    cache_key = f"equipment_{group_id}_{user_id}_{tool_category}"
+    cache_manager.set_cached_value(cache_key, tool_type)
+    
+    # 构建回复消息
+    tool_type_names = ["铁质", "精金", "强化合金", "强化合金【不毁】"]
+    tool_category_names = ["镐", "锄", "斧"]
+    
+    message = f"装备成功！当前装备：{tool_type_names[tool_type]}{tool_category_names[tool_category]}"
+    
+    # 显示工具耐久度
+    if tool_type != TOOL_ALLOY_PERM:
+        message += f"（耐久度：{durability}）"
+    else:
+        message += "（无限耐久）"
+    
+    return message
 
 def unequip_tool(group_id: int, user_id: int, tool_category: int) -> str:
     """卸下工具
@@ -202,30 +179,23 @@ def unequip_tool(group_id: int, user_id: int, tool_category: int) -> str:
     
     # 更新装备状态
     init_equipment_db()
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        
-        # 删除记录
-        sql = f"DELETE FROM user_equipment WHERE uid={user_id} AND belonging_group={group_id} AND tool_category={tool_category}"
-        cursor.execute(sql)
-        conn.commit()
-        
-        # 更新内存记录
-        if (group_id, user_id) in equipped_tools and tool_category in equipped_tools[(group_id, user_id)]:
-            del equipped_tools[(group_id, user_id)][tool_category]
-        
-        # 更新缓存
-        cache_key = f"equipment_{group_id}_{user_id}_{tool_category}"
-        cache_manager.clear_cache(cache_key)
-        
-        # 构建回复消息
-        tool_type_names = ["铁质", "精金", "强化合金", "强化合金【不毁】"]
-        tool_category_names = ["镐", "锄", "斧"]
-        
-        return f"卸下成功！已卸下{tool_type_names[current_tool_type]}{tool_category_names[tool_category]}"
-    finally:
-        db_pool.return_connection(conn)
+    # 删除记录
+    sql = f"DELETE FROM user_equipment WHERE uid={user_id} AND belonging_group={group_id} AND tool_category={tool_category}"
+    db_tool.execute_update(sql)
+    
+    # 更新内存记录
+    if (group_id, user_id) in equipped_tools and tool_category in equipped_tools[(group_id, user_id)]:
+        del equipped_tools[(group_id, user_id)][tool_category]
+    
+    # 更新缓存
+    cache_key = f"equipment_{group_id}_{user_id}_{tool_category}"
+    cache_manager.clear_cache(cache_key)
+    
+    # 构建回复消息
+    tool_type_names = ["铁质", "精金", "强化合金", "强化合金【不毁】"]
+    tool_category_names = ["镐", "锄", "斧"]
+    
+    return f"卸下成功！已卸下{tool_type_names[current_tool_type]}{tool_category_names[tool_category]}"
 
 def get_equipment_info(group_id: int, user_id: int) -> str:
     """获取用户装备信息

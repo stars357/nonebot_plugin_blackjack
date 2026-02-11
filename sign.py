@@ -5,8 +5,8 @@ import time
 
 from nonebot_plugin_apscheduler import scheduler
 
-# 导入公共数据库连接池
-from .db import db_pool
+# 导入公共数据库工具
+from .db import db_tool
 
 # 导入公共缓存模块
 from .cache import cache_manager
@@ -95,73 +95,69 @@ def sign_today(uid, group_id) -> str:
     if has_supreme_card:
         coins *= 100
     now = datetime.datetime.now()
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        sql = f"select * from sign_in where uid={uid} and belonging_group={group_id}"
-        data = cursor.execute(sql).fetchall()
-        if data:
-            date = data[0][1]
-            date = datetime.datetime.strptime(date, "%Y-%m-%d")
-            timedelta = now - date
-            coins_past = data[0][3]
-            if timedelta.days < 1:
-                return f"你今天已经签到过啦，请明天再来！\n你现在的金币是{coins_past}"
-            count = data[0][2] + 1
-            coins_now = coins_past + coins
-            
-            # 构建签到消息
-            message = f"签到成功，今日获得金币为{coins}"
-            
-            # 添加特殊事件消息
-            if zufen_event:
-                message += "\n【祖坟裂开】签到奖励×10！"
-            
-            if has_supreme_card:
-                message += "\n【至尊签到卡】签到奖励×100！"
-            
-            # 如果触发小倒霉蛋的馈赠事件
-            if xiaodaomeidan_event:
-                add_supreme_card(uid, group_id)
-                message += "\n恭喜获得【小倒霉蛋的馈赠】！获得至尊签到卡×1"
-            
-            sql = f"UPDATE sign_in set sign_in_date = date(CURRENT_TIMESTAMP,'localtime'), total_sign_in = {count}," \
-                  f" points = {coins_now}, today_point = {coins} where uid = {uid} and belonging_group = {group_id}"
-            cursor.execute(sql)
-            conn.commit()
-            
-            # 清除缓存
-            cache_key = f"sign_{group_id}_{uid}"
-            cache_manager.clear_cache(cache_key)
-            
-            message += f"\n你现在的金币是{coins_now:.2f}"
-            return message
-        else:
-            # 构建签到消息
-            message = f"签到成功，今日获得金币为{coins}"
-            
-            # 添加特殊事件消息
-            if zufen_event:
-                message += "\n【祖坟裂开】签到奖励×10！"
-            
-            # 如果触发小倒霉蛋的馈赠事件
-            if xiaodaomeidan_event:
-                add_supreme_card(uid, group_id)
-                message += "\n恭喜获得【小倒霉蛋的馈赠】！获得至尊签到卡×1"
-            
-            sql = f"INSERT INTO sign_in VALUES(null, date(CURRENT_TIMESTAMP,'localtime'), 1, {coins}, {group_id}," \
-                  f" {uid}, {coins})"
-            cursor.execute(sql)
-            conn.commit()
-            
-            # 清除缓存
-            cache_key = f"sign_{group_id}_{uid}"
-            cache_manager.clear_cache(cache_key)
-            
-            message += f"\n你现在的金币是{coins:.2f}"
-            return message
-    finally:
-        db_pool.return_connection(conn)
+    
+    # 检查用户是否已经签到过
+    sql = f"select * from sign_in where uid={uid} and belonging_group={group_id}"
+    data = db_tool.execute_query(sql)
+    
+    if data:
+        date = data[0][1]
+        date = datetime.datetime.strptime(date, "%Y-%m-%d")
+        timedelta = now - date
+        coins_past = data[0][3]
+        if timedelta.days < 1:
+            return f"你今天已经签到过啦，请明天再来！\n你现在的金币是{coins_past}"
+        count = data[0][2] + 1
+        coins_now = coins_past + coins
+        
+        # 构建签到消息
+        message = f"签到成功，今日获得金币为{coins}"
+        
+        # 添加特殊事件消息
+        if zufen_event:
+            message += "\n【祖坟裂开】签到奖励×10！"
+        
+        if has_supreme_card:
+            message += "\n【至尊签到卡】签到奖励×100！"
+        
+        # 如果触发小倒霉蛋的馈赠事件
+        if xiaodaomeidan_event:
+            add_supreme_card(uid, group_id)
+            message += "\n恭喜获得【小倒霉蛋的馈赠】！获得至尊签到卡×1"
+        
+        sql = f"UPDATE sign_in set sign_in_date = date(CURRENT_TIMESTAMP,'localtime'), total_sign_in = {count}," \
+              f" points = {coins_now}, today_point = {coins} where uid = {uid} and belonging_group = {group_id}"
+        db_tool.execute_update(sql)
+        
+        # 清除缓存
+        cache_key = f"sign_{group_id}_{uid}"
+        cache_manager.clear_cache(cache_key)
+        
+        message += f"\n你现在的金币是{coins_now:.2f}"
+        return message
+    else:
+        # 构建签到消息
+        message = f"签到成功，今日获得金币为{coins}"
+        
+        # 添加特殊事件消息
+        if zufen_event:
+            message += "\n【祖坟裂开】签到奖励×10！"
+        
+        # 如果触发小倒霉蛋的馈赠事件
+        if xiaodaomeidan_event:
+            add_supreme_card(uid, group_id)
+            message += "\n恭喜获得【小倒霉蛋的馈赠】！获得至尊签到卡×1"
+        
+        sql = f"INSERT INTO sign_in VALUES(null, date(CURRENT_TIMESTAMP,'localtime'), 1, {coins}, {group_id}," \
+              f" {uid}, {coins})"
+        db_tool.execute_update(sql)
+        
+        # 清除缓存
+        cache_key = f"sign_{group_id}_{uid}"
+        cache_manager.clear_cache(cache_key)
+        
+        message += f"\n你现在的金币是{coins:.2f}"
+        return message
 
 
 def get_point(group: int, uid: int) -> float:
@@ -173,87 +169,68 @@ def get_point(group: int, uid: int) -> float:
         return cached_value
     
     # 从数据库获取
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        sql = f"select * from sign_in where belonging_group={group} and uid={uid}"
-        cursor.execute(sql)
-        result = cursor.fetchone()
-        if result:
-            point = float(result[3])
-        else:
-            point = 0.0
-        
-        # 更新缓存
-        cache_manager.set_cached_value(cache_key, point)
-        
-        return point
-    finally:
-        db_pool.return_connection(conn)
+    sql = f"select * from sign_in where belonging_group={group} and uid={uid}"
+    result = db_tool.execute_query(sql)
+    if result:
+        point = float(result[0][3])
+    else:
+        point = 0.0
+    
+    # 更新缓存
+    cache_manager.set_cached_value(cache_key, point)
+    
+    return point
 
 
 def update_point(group: int, uid: int, point: float):
     init()
     # 更新数据库
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        sql = f"update sign_in set points={point} where belonging_group={group} and uid={uid}"
-        cursor.execute(sql)
-        conn.commit()
-        
-        # 更新缓存
-        cache_key = f"sign_point_{group}_{uid}"
-        cache_manager.set_cached_value(cache_key, point)
-    finally:
-        db_pool.return_connection(conn)
+    sql = f"update sign_in set points={point} where belonging_group={group} and uid={uid}"
+    db_tool.execute_update(sql)
+    
+    # 更新缓存
+    cache_key = f"sign_point_{group}_{uid}"
+    cache_manager.set_cached_value(cache_key, point)
 
 
 def init():
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        # 修改points字段类型为REAL，支持小数
-        sql = """create table if not exists sign_in(
-            id integer primary key autoincrement,
-            sign_in_date datetime not null,
-            total_sign_in int not null,
-            points REAL not null,
-            belonging_group int not null,
-            uid int not null,
-            today_point REAL
-        )
-        """
-        cursor.execute(sql)
-        
-        # 创建至尊签到卡表
-        sql = """create table if not exists supreme_cards(
-            id integer primary key autoincrement,
-            uid int not null,
-            belonging_group int not null,
-            acquire_date datetime not null
-        )
-        """
-        cursor.execute(sql)
-        
-        # 创建特权用户表 - 下次签到必定获得至尊签到卡
-        # 保留此表以避免兼容性问题，但不再使用
-        sql = """create table if not exists privileged_users(
-            id integer primary key autoincrement,
-            uid int not null,
-            belonging_group int not null,
-            add_date datetime not null,
-            used int not null default 0,
-            UNIQUE(uid, belonging_group)
-        )
-        """
-        cursor.execute(sql)
-        
-        # 注意：不再创建小倒霉蛋特权用户表，现在使用硬编码字典
-        
-        conn.commit()
-    finally:
-        db_pool.return_connection(conn)
+    # 修改points字段类型为REAL，支持小数
+    sql = """create table if not exists sign_in(
+        id integer primary key autoincrement,
+        sign_in_date datetime not null,
+        total_sign_in int not null,
+        points REAL not null,
+        belonging_group int not null,
+        uid int not null,
+        today_point REAL
+    )
+    """
+    db_tool.execute_update(sql)
+    
+    # 创建至尊签到卡表
+    sql = """create table if not exists supreme_cards(
+        id integer primary key autoincrement,
+        uid int not null,
+        belonging_group int not null,
+        acquire_date datetime not null
+    )
+    """
+    db_tool.execute_update(sql)
+    
+    # 创建特权用户表 - 下次签到必定获得至尊签到卡
+    # 保留此表以避免兼容性问题，但不再使用
+    sql = """create table if not exists privileged_users(
+        id integer primary key autoincrement,
+        uid int not null,
+        belonging_group int not null,
+        add_date datetime not null,
+        used int not null default 0,
+        UNIQUE(uid, belonging_group)
+    )
+    """
+    db_tool.execute_update(sql)
+    
+    # 注意：不再创建小倒霉蛋特权用户表，现在使用硬编码字典
 
 
 def check_supreme_card(uid: int, group_id: int) -> bool:
@@ -265,47 +242,34 @@ def check_supreme_card(uid: int, group_id: int) -> bool:
         return cached_value
     
     # 从数据库获取
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        sql = "select * from supreme_cards where uid=? and belonging_group=?"
-        cursor.execute(sql, (uid, group_id))
-        result = cursor.fetchone()
-        has_card = result is not None
-        
-        # 更新缓存
-        cache_manager.set_cached_value(cache_key, has_card)
-        
-        return has_card
-    finally:
-        db_pool.return_connection(conn)
+    sql = f"select * from supreme_cards where uid={uid} and belonging_group={group_id}"
+    result = db_tool.execute_query(sql)
+    has_card = len(result) > 0
+    
+    # 更新缓存
+    cache_manager.set_cached_value(cache_key, has_card)
+    
+    return has_card
 
 
 def add_supreme_card(uid: int, group_id: int):
     """为用户添加至尊签到卡"""
-    # 更新数据库
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        # 先检查是否已存在记录
-        sql = "select * from supreme_cards where uid=? and belonging_group=?"
-        cursor.execute(sql, (uid, group_id))
-        result = cursor.fetchone()
-        if result:
-            # 如果存在，更新数量
-            sql = "update supreme_cards set card_count=card_count+1 where uid=? and belonging_group=?"
-            cursor.execute(sql, (uid, group_id))
-        else:
-            # 如果不存在，插入新记录
-            sql = "insert into supreme_cards (uid, belonging_group, card_count) values (?, ?, 1)"
-            cursor.execute(sql, (uid, group_id))
-        conn.commit()
-        
-        # 清除缓存，确保下次查询时重新获取
-        cache_key = f"supreme_card_{group_id}_{uid}"
-        cache_manager.clear_cache(cache_key)
-    finally:
-        db_pool.return_connection(conn)
+    # 先检查是否已存在记录
+    sql = f"select * from supreme_cards where uid={uid} and belonging_group={group_id}"
+    result = db_tool.execute_query(sql)
+    
+    if result:
+        # 如果存在，更新获取日期
+        sql = f"update supreme_cards set acquire_date=date(CURRENT_TIMESTAMP,'localtime') where uid={uid} and belonging_group={group_id}"
+    else:
+        # 如果不存在，插入新记录
+        sql = f"insert into supreme_cards (uid, belonging_group, acquire_date) values ({uid}, {group_id}, date(CURRENT_TIMESTAMP,'localtime'))"
+    
+    db_tool.execute_update(sql)
+    
+    # 清除缓存，确保下次查询时重新获取
+    cache_key = f"supreme_card_{group_id}_{uid}"
+    cache_manager.clear_cache(cache_key)
 
 
 # 以下函数已被移除，保留数据库表结构以避免兼容性问题

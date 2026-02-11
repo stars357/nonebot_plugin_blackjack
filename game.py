@@ -5,8 +5,8 @@ from nonebot.adapters.onebot.v11 import Bot
 from enum import Enum
 from typing import List, Dict, Tuple, Optional, Union
 
-# 导入公共数据库连接池
-from .db import db_pool
+# 导入数据库工具
+from .db import db_tool
 
 # 导入公共缓存模块
 from .cache import cache_manager
@@ -381,39 +381,27 @@ def get_user_point(group: int, uid: int) -> float:
         return point
     
     # 从数据库获取
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        sql = f"select * from sign_in where belonging_group={group} and uid={uid}"
-        cursor.execute(sql)
-        result = cursor.fetchone()
-        if result:
-            point = float(result[3])
-        else:
-            point = 0.0
-        
-        # 更新缓存
-        cache_manager.set_cached_value("user_point_cache", cache_key, point)
-        
-        return point
-    finally:
-        db_pool.return_connection(conn)
+    sql = f"select * from sign_in where belonging_group={group} and uid={uid}"
+    result = db_tool.execute_one(sql)
+    if result:
+        point = float(result[3])
+    else:
+        point = 0.0
+    
+    # 更新缓存
+    cache_manager.set_cached_value("user_point_cache", cache_key, point)
+    
+    return point
 
 
 def update_point(group: int, uid: int, point: float):
     # 更新数据库
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        sql = f"""update sign_in set points={point} where belonging_group={group} and uid={uid}"""
-        cursor.execute(sql)
-        conn.commit()
-        
-        # 更新缓存
-        cache_key = (group, uid)
-        cache_manager.set_cached_value("user_point_cache", cache_key, point)
-    finally:
-        db_pool.return_connection(conn)
+    sql = f"""update sign_in set points={point} where belonging_group={group} and uid={uid}"""
+    db_tool.execute_update(sql)
+    
+    # 更新缓存
+    cache_key = (group, uid)
+    cache_manager.set_cached_value("user_point_cache", cache_key, point)
 
 
 def get_point(group: int, uid: int) -> float:
@@ -424,43 +412,31 @@ def get_point(group: int, uid: int) -> float:
         return point
     
     # 从数据库获取
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        sql = f"select * from sign_in where belonging_group={group} and uid={uid}"
-        cursor.execute(sql)
-        result = cursor.fetchone()
-        if result:
-            point = float(result[3])
-        else:
-            point = 0.0
-        
-        # 更新缓存
-        cache_manager.set_cached_value("user_point_cache", cache_key, point)
-        
-        return point
-    finally:
-        db_pool.return_connection(conn)
+    sql = f"select * from sign_in where belonging_group={group} and uid={uid}"
+    result = db_tool.execute_one(sql)
+    if result:
+        point = float(result[3])
+    else:
+        point = 0.0
+    
+    # 更新缓存
+    cache_manager.set_cached_value("user_point_cache", cache_key, point)
+    
+    return point
 
 
 def init():
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        sql = """create table if not exists sign_in(
-            id integer primary key autoincrement,
-            sign_in_date datetime not null,
-            total_sign_in int not null,
-            points int not null,
-            belonging_group int not null,
-            uid int not null,
-            today_point int
-        )
-        """
-        cursor.execute(sql)
-        conn.commit()
-    finally:
-        db_pool.return_connection(conn)
+    sql = """create table if not exists sign_in(
+        id integer primary key autoincrement,
+        sign_in_date datetime not null,
+        total_sign_in int not null,
+        points int not null,
+        belonging_group int not null,
+        uid int not null,
+        today_point int
+    )
+    """
+    db_tool.execute_update(sql)
 
 # 初始化数据库
 init()
@@ -552,34 +528,30 @@ def get_battle_info(group: int, battle_id: int) -> list:
 
 
 async def get_rank(group_id: int, bot: Bot) -> str:
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        sql = f'select uid, points from sign_in where belonging_group={group_id} order by points desc limit 3'
-        cursor.execute(sql)
-        data = cursor.execute(sql).fetchall()
-        count = 1
-        msg = "签到金币排名\n"
-        for i in data:
-            uid = i[0]
-            points = i[1]
-            sender = await bot.get_group_member_info(group_id=group_id, user_id=uid)
-            name = sender['card'] or sender.get('nickname', '')
-            msg += f'第{count}名：{name}  {points}金币\n'
-            count += 1
-        sql = f"select uid, today_point from sign_in where belonging_group={group_id} " \
-              f"and sign_in_date = date('now', 'localtime') order by today_point desc limit 5"
-        cursor.execute(sql)
-        data = cursor.execute(sql).fetchall()
-        msg += "\n今日签到金币排名\n"
-        count = 1
-        for i in data:
-            uid = i[0]
-            points = i[1]
-            sender = await bot.get_group_member_info(group_id=group_id, user_id=uid)
-            name = sender['card'] or sender.get('nickname', '')
-            msg += f'第{count}名：{name}  {points}金币\n'
-            count += 1
-        return msg[:-1]
-    finally:
-        db_pool.return_connection(conn)
+    # 获取总金币排名
+    sql = f'select uid, points from sign_in where belonging_group={group_id} order by points desc limit 3'
+    data = db_tool.execute_query(sql)
+    count = 1
+    msg = "签到金币排名\n"
+    for i in data:
+        uid = i[0]
+        points = i[1]
+        sender = await bot.get_group_member_info(group_id=group_id, user_id=uid)
+        name = sender['card'] or sender.get('nickname', '')
+        msg += f'第{count}名：{name}  {points}金币\n'
+        count += 1
+    
+    # 获取今日金币排名
+    sql = f"select uid, today_point from sign_in where belonging_group={group_id} " \
+          f"and sign_in_date = date('now', 'localtime') order by today_point desc limit 5"
+    data = db_tool.execute_query(sql)
+    msg += "\n今日签到金币排名\n"
+    count = 1
+    for i in data:
+        uid = i[0]
+        points = i[1]
+        sender = await bot.get_group_member_info(group_id=group_id, user_id=uid)
+        name = sender['card'] or sender.get('nickname', '')
+        msg += f'第{count}名：{name}  {points}金币\n'
+        count += 1
+    return msg[:-1]

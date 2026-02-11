@@ -10,7 +10,7 @@ from .resource import (
     RESOURCE_PRICES
 )
 from .common import SPECIAL_BLUE_GEM, SPECIAL_DEMON_BRANCH
-from .db import db_pool
+from .db import db_tool
 
 # 阵营类型常量
 FACTION_NONE = -1      # 无阵营
@@ -46,95 +46,76 @@ special_resource_cd: Dict[Tuple[int, int], float] = {}
 
 def init_faction_db():
     """初始化阵营数据库"""
-    conn = None
-    try:
-        conn = db_pool.get_connection()
-        cursor = conn.cursor()
-        
-        # 创建阵营成员表
-        sql = """
-        CREATE TABLE IF NOT EXISTS faction_members (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            uid INTEGER NOT NULL,
-            belonging_group INTEGER NOT NULL,
-            faction_type INTEGER NOT NULL DEFAULT -1,  -- -1: 无阵营, 0: 水水军, 1: 魔王军
-            join_date DATE NOT NULL,
-            UNIQUE(uid, belonging_group)
-        )
-        """
-        cursor.execute(sql)
-        
-        # 创建阵营资源池表
-        sql = """
-        CREATE TABLE IF NOT EXISTS faction_resource_pools (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            belonging_group INTEGER NOT NULL,
-            faction_type INTEGER NOT NULL,  -- 0: 水水军, 1: 魔王军
-            resource_type INTEGER NOT NULL,  -- 0: 食物, 1: 木材, 2: 矿石
-            amount INTEGER NOT NULL DEFAULT 0,
-            UNIQUE(belonging_group, faction_type, resource_type)
-        )
-        """
-        cursor.execute(sql)
-        
-        # 创建阵营战争记录表
-        sql = """
-        CREATE TABLE IF NOT EXISTS faction_war_records (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            belonging_group INTEGER NOT NULL,
-            attacker_faction INTEGER NOT NULL,
-            defender_faction INTEGER NOT NULL,
-            resource_type INTEGER NOT NULL,
-            amount INTEGER NOT NULL,
-            war_date DATE NOT NULL
-        )
-        """
-        cursor.execute(sql)
-        
-        # 创建贸易禁运表
-        sql = """
-        CREATE TABLE IF NOT EXISTS trade_embargoes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            belonging_group INTEGER NOT NULL,
-            faction_type INTEGER NOT NULL,  -- 发起禁运的阵营
-            target_faction INTEGER NOT NULL,  -- 被禁运的阵营
-            resource_type INTEGER NOT NULL,  -- 被禁运的资源类型
-            start_date DATE NOT NULL,
-            UNIQUE(belonging_group, faction_type, target_faction, resource_type)
-        )
-        """
-        cursor.execute(sql)
-        
-        conn.commit()
-    finally:
-        if conn:
-            db_pool.return_connection(conn)
+    # 创建阵营成员表
+    sql = """
+    CREATE TABLE IF NOT EXISTS faction_members (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uid INTEGER NOT NULL,
+        belonging_group INTEGER NOT NULL,
+        faction_type INTEGER NOT NULL DEFAULT -1,  -- -1: 无阵营, 0: 水水军, 1: 魔王军
+        join_date DATE NOT NULL,
+        UNIQUE(uid, belonging_group)
+    )
+    """
+    db_tool.execute_update(sql)
+    
+    # 创建阵营资源池表
+    sql = """
+    CREATE TABLE IF NOT EXISTS faction_resource_pools (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        belonging_group INTEGER NOT NULL,
+        faction_type INTEGER NOT NULL,  -- 0: 水水军, 1: 魔王军
+        resource_type INTEGER NOT NULL,  -- 0: 食物, 1: 木材, 2: 矿石
+        amount INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(belonging_group, faction_type, resource_type)
+    )
+    """
+    db_tool.execute_update(sql)
+    
+    # 创建阵营战争记录表
+    sql = """
+    CREATE TABLE IF NOT EXISTS faction_war_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        belonging_group INTEGER NOT NULL,
+        attacker_faction INTEGER NOT NULL,
+        defender_faction INTEGER NOT NULL,
+        resource_type INTEGER NOT NULL,
+        amount INTEGER NOT NULL,
+        war_date DATE NOT NULL
+    )
+    """
+    db_tool.execute_update(sql)
+    
+    # 创建贸易禁运表
+    sql = """
+    CREATE TABLE IF NOT EXISTS trade_embargoes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        belonging_group INTEGER NOT NULL,
+        faction_type INTEGER NOT NULL,  -- 发起禁运的阵营
+        target_faction INTEGER NOT NULL,  -- 被禁运的阵营
+        resource_type INTEGER NOT NULL,  -- 被禁运的资源类型
+        start_date DATE NOT NULL,
+        UNIQUE(belonging_group, faction_type, target_faction, resource_type)
+    )
+    """
+    db_tool.execute_update(sql)
 
 def get_user_faction(group_id: int, user_id: int) -> int:
     """获取用户所属阵营"""
     init_faction_db()
-    conn = None
-    try:
-        conn = db_pool.get_connection()
-        cursor = conn.cursor()
-        
-        sql = f"SELECT faction_type FROM faction_members WHERE uid={user_id} AND belonging_group={group_id}"
-        cursor.execute(sql)
-        result = cursor.fetchone()
-        
-        if result is None:
-            # 创建新记录，默认无阵营
-            sql = f"INSERT INTO faction_members (uid, belonging_group, faction_type, join_date) VALUES ({user_id}, {group_id}, {FACTION_NONE}, '{datetime.date.today().isoformat()}')"
-            cursor.execute(sql)
-            conn.commit()
-            faction_type = FACTION_NONE
-        else:
-            faction_type = result[0]
-        
-        return faction_type
-    finally:
-        if conn:
-            db_pool.return_connection(conn)
+    # 检查用户是否有阵营记录
+    sql = f"SELECT faction_type FROM faction_members WHERE uid={user_id} AND belonging_group={group_id}"
+    result = db_tool.execute_one(sql)
+    
+    if result is None:
+        # 创建新记录，默认无阵营
+        sql = f"INSERT INTO faction_members (uid, belonging_group, faction_type, join_date) VALUES ({user_id}, {group_id}, {FACTION_NONE}, '{datetime.date.today().isoformat()}')"
+        db_tool.execute_update(sql)
+        faction_type = FACTION_NONE
+    else:
+        faction_type = result[0]
+    
+    return faction_type
 
 def join_faction(group_id: int, user_id: int, faction_type: int) -> str:
     """加入阵营"""
@@ -155,41 +136,25 @@ def join_faction(group_id: int, user_id: int, faction_type: int) -> str:
     
     # 加入新阵营
     init_faction_db()
-    conn = None
-    try:
-        conn = db_pool.get_connection()
-        cursor = conn.cursor()
-        
-        today = datetime.date.today().isoformat()
-        sql = f"UPDATE faction_members SET faction_type={faction_type}, join_date='{today}' WHERE uid={user_id} AND belonging_group={group_id}"
-        cursor.execute(sql)
-        conn.commit()
-        
-        # 返回加入成功信息和阵营特权说明
-        special_resource = "海蓝宝石" if faction_type == FACTION_WATER else "恶魔树枝干"
-        return f"你已成功加入{FACTION_NAMES[faction_type]}！\n\n阵营特权：\n- 可以产出特殊资源：{special_resource}\n- 可以参与阵营资源池共享\n- 可以参与阵营战争和贸易禁运"
-    finally:
-        if conn:
-            db_pool.return_connection(conn)
+    
+    today = datetime.date.today().isoformat()
+    sql = f"UPDATE faction_members SET faction_type={faction_type}, join_date='{today}' WHERE uid={user_id} AND belonging_group={group_id}"
+    db_tool.execute_update(sql)
+    
+    # 返回加入成功信息和阵营特权说明
+    special_resource = "海蓝宝石" if faction_type == FACTION_WATER else "恶魔树枝干"
+    return f"你已成功加入{FACTION_NAMES[faction_type]}！\n\n阵营特权：\n- 可以产出特殊资源：{special_resource}\n- 可以参与阵营资源池共享\n- 可以参与阵营战争和贸易禁运"
 
 def get_faction_members(group_id: int, faction_type: int) -> List[int]:
     """获取阵营成员列表"""
     init_faction_db()
-    conn = None
-    try:
-        conn = db_pool.get_connection()
-        cursor = conn.cursor()
-        
-        sql = f"SELECT uid FROM faction_members WHERE belonging_group={group_id} AND faction_type={faction_type}"
-        cursor.execute(sql)
-        results = cursor.fetchall()
-        
-        members = [result[0] for result in results]
-        
-        return members
-    finally:
-        if conn:
-            db_pool.return_connection(conn)
+    
+    sql = f"SELECT uid FROM faction_members WHERE belonging_group={group_id} AND faction_type={faction_type}"
+    results = db_tool.execute_query(sql)
+    
+    members = [result[0] for result in results]
+    
+    return members
 
 def get_faction_resource_pool(group_id: int, faction_type: int, resource_type: int) -> int:
     """获取阵营资源池中的资源数量"""
@@ -199,35 +164,26 @@ def get_faction_resource_pool(group_id: int, faction_type: int, resource_type: i
     
     # 从数据库中查询
     init_faction_db()
-    conn = None
-    try:
-        conn = db_pool.get_connection()
-        cursor = conn.cursor()
-        
-        sql = f"SELECT amount FROM faction_resource_pools WHERE belonging_group={group_id} AND faction_type={faction_type} AND resource_type={resource_type}"
-        cursor.execute(sql)
-        result = cursor.fetchone()
-        
-        if result is None:
-            # 创建新记录
-            sql = f"INSERT INTO faction_resource_pools (belonging_group, faction_type, resource_type, amount) VALUES ({group_id}, {faction_type}, {resource_type}, 0)"
-            cursor.execute(sql)
-            conn.commit()
-            amount = 0
-        else:
-            amount = result[0]
-        
-        # 更新内存中的记录
-        if group_id not in faction_resource_pools:
-            faction_resource_pools[group_id] = {}
-        if faction_type not in faction_resource_pools[group_id]:
-            faction_resource_pools[group_id][faction_type] = {}
-        faction_resource_pools[group_id][faction_type][resource_type] = amount
-        
-        return amount
-    finally:
-        if conn:
-            db_pool.return_connection(conn)
+    
+    sql = f"SELECT amount FROM faction_resource_pools WHERE belonging_group={group_id} AND faction_type={faction_type} AND resource_type={resource_type}"
+    result = db_tool.execute_one(sql)
+    
+    if result is None:
+        # 创建新记录
+        sql = f"INSERT INTO faction_resource_pools (belonging_group, faction_type, resource_type, amount) VALUES ({group_id}, {faction_type}, {resource_type}, 0)"
+        db_tool.execute_update(sql)
+        amount = 0
+    else:
+        amount = result[0]
+    
+    # 更新内存中的记录
+    if group_id not in faction_resource_pools:
+        faction_resource_pools[group_id] = {}
+    if faction_type not in faction_resource_pools[group_id]:
+        faction_resource_pools[group_id][faction_type] = {}
+    faction_resource_pools[group_id][faction_type][resource_type] = amount
+    
+    return amount
 
 def update_faction_resource_pool(group_id: int, faction_type: int, resource_type: int, amount: int) -> None:
     """更新阵营资源池中的资源数量"""
@@ -237,24 +193,16 @@ def update_faction_resource_pool(group_id: int, faction_type: int, resource_type
     
     # 更新数据库
     init_faction_db()
-    conn = None
-    try:
-        conn = db_pool.get_connection()
-        cursor = conn.cursor()
-        
-        sql = f"UPDATE faction_resource_pools SET amount={new_amount} WHERE belonging_group={group_id} AND faction_type={faction_type} AND resource_type={resource_type}"
-        cursor.execute(sql)
-        conn.commit()
-        
-        # 更新内存中的记录
-        if group_id not in faction_resource_pools:
-            faction_resource_pools[group_id] = {}
-        if faction_type not in faction_resource_pools[group_id]:
-            faction_resource_pools[group_id][faction_type] = {}
-        faction_resource_pools[group_id][faction_type][resource_type] = new_amount
-    finally:
-        if conn:
-            db_pool.return_connection(conn)
+    
+    sql = f"UPDATE faction_resource_pools SET amount={new_amount} WHERE belonging_group={group_id} AND faction_type={faction_type} AND resource_type={resource_type}"
+    db_tool.execute_update(sql)
+    
+    # 更新内存中的记录
+    if group_id not in faction_resource_pools:
+        faction_resource_pools[group_id] = {}
+    if faction_type not in faction_resource_pools[group_id]:
+        faction_resource_pools[group_id][faction_type] = {}
+    faction_resource_pools[group_id][faction_type][resource_type] = new_amount
 
 def contribute_to_faction_pool(group_id: int, user_id: int, resource_type: int, amount: int) -> str:
     """向阵营资源池贡献资源"""
@@ -408,18 +356,10 @@ def end_faction_war(group_id: int) -> str:
         
         # 记录战争结果
         init_faction_db()
-        conn = None
-        try:
-            conn = db_pool.get_connection()
-            cursor = conn.cursor()
-            
-            today = datetime.date.today().isoformat()
-            sql = f"INSERT INTO faction_war_records (belonging_group, attacker_faction, defender_faction, resource_type, amount, war_date) VALUES ({group_id}, {attacker_faction}, {defender_faction}, {resource_type}, {steal_amount}, '{today}')"
-            cursor.execute(sql)
-            conn.commit()
-        finally:
-            if conn:
-                conn.close()
+        
+        today = datetime.date.today().isoformat()
+        sql = f"INSERT INTO faction_war_records (belonging_group, attacker_faction, defender_faction, resource_type, amount, war_date) VALUES ({group_id}, {attacker_faction}, {defender_faction}, {resource_type}, {steal_amount}, '{today}')"
+        db_tool.execute_update(sql)
     
     # 清除战争状态
     del faction_wars[group_id]
@@ -534,18 +474,10 @@ def vote_for_embargo(group_id: int, user_id: int, vote: bool) -> str:
         
         # 记录到数据库
         init_faction_db()
-        conn = None
-        try:
-            conn = db_pool.get_connection()
-            cursor = conn.cursor()
-            
-            today = datetime.date.today().isoformat()
-            sql = f"INSERT OR REPLACE INTO trade_embargoes (belonging_group, faction_type, target_faction, resource_type, start_date) VALUES ({group_id}, {faction_type}, {target_faction}, {resource_type}, '{today}')"
-            cursor.execute(sql)
-            conn.commit()
-        finally:
-            if conn:
-                conn.close()
+        
+        today = datetime.date.today().isoformat()
+        sql = f"INSERT OR REPLACE INTO trade_embargoes (belonging_group, faction_type, target_faction, resource_type, start_date) VALUES ({group_id}, {faction_type}, {target_faction}, {resource_type}, '{today}')"
+        db_tool.execute_update(sql)
         
         # 清除投票
         del faction_votes[group_id][faction_type]
@@ -568,19 +500,11 @@ def check_embargo(group_id: int, seller_faction: int, buyer_faction: int, resour
     
     # 从数据库中查询
     init_faction_db()
-    conn = None
-    try:
-        conn = db_pool.get_connection()
-        cursor = conn.cursor()
-        
-        sql = f"SELECT id FROM trade_embargoes WHERE belonging_group={group_id} AND faction_type={seller_faction} AND target_faction={buyer_faction} AND resource_type={resource_type}"
-        cursor.execute(sql)
-        result = cursor.fetchone()
-        
-        embargo_exists = result is not None
-    finally:
-        if conn:
-            db_pool.return_connection(conn)
+    
+    sql = f"SELECT id FROM trade_embargoes WHERE belonging_group={group_id} AND faction_type={seller_faction} AND target_faction={buyer_faction} AND resource_type={resource_type}"
+    result = db_tool.execute_one(sql)
+    
+    embargo_exists = result is not None
     
     # 更新内存中的记录
     if embargo_exists:
@@ -616,17 +540,9 @@ def lift_embargo(group_id: int, user_id: int, target_faction: int, resource_type
     
     # 从数据库中删除禁运记录
     init_faction_db()
-    conn = None
-    try:
-        conn = db_pool.get_connection()
-        cursor = conn.cursor()
-        
-        sql = f"DELETE FROM trade_embargoes WHERE belonging_group={group_id} AND faction_type={faction_type} AND target_faction={target_faction} AND resource_type={resource_type}"
-        cursor.execute(sql)
-        conn.commit()
-    finally:
-        if conn:
-            db_pool.return_connection(conn)
+    
+    sql = f"DELETE FROM trade_embargoes WHERE belonging_group={group_id} AND faction_type={faction_type} AND target_faction={target_faction} AND resource_type={resource_type}"
+    db_tool.execute_update(sql)
     
     # 更新内存中的记录
     if group_id in trade_embargoes and faction_type in trade_embargoes[group_id] and target_faction in trade_embargoes[group_id][faction_type]:
@@ -647,17 +563,8 @@ def get_embargoes_info(group_id: int, faction_type: int) -> str:
     
     # 从数据库中查询禁运记录
     init_faction_db()
-    conn = None
-    try:
-        conn = db_pool.get_connection()
-        cursor = conn.cursor()
-        
-        sql = f"SELECT target_faction, resource_type FROM trade_embargoes WHERE belonging_group={group_id} AND faction_type={faction_type}"
-        cursor.execute(sql)
-        results = cursor.fetchall()
-    finally:
-        if conn:
-            db_pool.return_connection(conn)
+    sql = f"SELECT target_faction, resource_type FROM trade_embargoes WHERE belonging_group={group_id} AND faction_type={faction_type}"
+    results = db_tool.execute_query(sql)
     
     if not results:
         return f"{FACTION_NAMES[faction_type]}当前没有实施任何贸易禁运。"
@@ -700,53 +607,44 @@ def produce_special_resource(group_id: int, user_id: int) -> str:
     
     # 从数据库中查询CD
     init_faction_db()
-    conn = None
-    try:
-        conn = db_pool.get_connection()
-        cursor = conn.cursor()
-        
-        sql = f"SELECT end_time FROM special_resource_cd WHERE uid={user_id} AND belonging_group={group_id}"
-        cursor.execute(sql)
-        result = cursor.fetchone()
-        
-        if result:
-            end_time = datetime.datetime.fromisoformat(result[0]).timestamp()
-            if current_time < end_time:
-                remaining_time = int(end_time - current_time)
-                minutes = remaining_time // 60
-                seconds = remaining_time % 60
-                
-                # 更新内存中的CD记录
-                special_resource_cd[(group_id, user_id)] = end_time
-                
-                return f"特殊资源产出CD中，还需等待{minutes}分{seconds}秒。"
-        
-        # 确定特殊资源类型
-        special_resource_type = FACTION_SPECIAL_RESOURCES[faction_type]
-        
-        # 随机产出数量（1~3）
-        amount = random.randint(1, 3)
-        
-        # 更新用户特殊资源
-        from .profession import update_special_resource, get_special_resource
-        current_amount = get_special_resource(group_id, user_id, special_resource_type)
-        update_special_resource(group_id, user_id, special_resource_type, amount)
-        
-        # 设置CD（12小时）
-        cd_duration = 12 * 3600
-        end_time = current_time + cd_duration
-        end_time_dt = datetime.datetime.fromtimestamp(end_time)
-        
-        # 更新数据库中的CD记录
-        sql = f"INSERT OR REPLACE INTO special_resource_cd (uid, belonging_group, end_time) VALUES ({user_id}, {group_id}, '{end_time_dt.isoformat()}')"
-        cursor.execute(sql)
-        conn.commit()
-        
-        # 更新内存中的CD记录
-        special_resource_cd[(group_id, user_id)] = end_time
-    finally:
-        if conn:
-            db_pool.return_connection(conn)
+    
+    sql = f"SELECT end_time FROM special_resource_cd WHERE uid={user_id} AND belonging_group={group_id}"
+    result = db_tool.execute_one(sql)
+    
+    if result:
+        end_time = datetime.datetime.fromisoformat(result[0]).timestamp()
+        if current_time < end_time:
+            remaining_time = int(end_time - current_time)
+            minutes = remaining_time // 60
+            seconds = remaining_time % 60
+            
+            # 更新内存中的CD记录
+            special_resource_cd[(group_id, user_id)] = end_time
+            
+            return f"特殊资源产出CD中，还需等待{minutes}分{seconds}秒。"
+    
+    # 确定特殊资源类型
+    special_resource_type = FACTION_SPECIAL_RESOURCES[faction_type]
+    
+    # 随机产出数量（1~3）
+    amount = random.randint(1, 3)
+    
+    # 更新用户特殊资源
+    from .profession import update_special_resource, get_special_resource
+    current_amount = get_special_resource(group_id, user_id, special_resource_type)
+    update_special_resource(group_id, user_id, special_resource_type, amount)
+    
+    # 设置CD（12小时）
+    cd_duration = 12 * 3600
+    end_time = current_time + cd_duration
+    end_time_dt = datetime.datetime.fromtimestamp(end_time)
+    
+    # 更新数据库中的CD记录
+    sql = f"INSERT OR REPLACE INTO special_resource_cd (uid, belonging_group, end_time) VALUES ({user_id}, {group_id}, '{end_time_dt.isoformat()}')"
+    db_tool.execute_update(sql)
+    
+    # 更新内存中的CD记录
+    special_resource_cd[(group_id, user_id)] = end_time
     
     # 获取特殊资源名称
     resource_name = "海蓝宝石" if special_resource_type == SPECIAL_BLUE_GEM else "恶魔树枝干"
@@ -796,32 +694,23 @@ def get_user_faction_info(group_id: int, user_id: int) -> str:
     else:
         # 从数据库中查询CD
         init_faction_db()
-        conn = None
-        try:
-            conn = db_pool.get_connection()
-            cursor = conn.cursor()
-            
-            sql = f"SELECT end_time FROM special_resource_cd WHERE uid={user_id} AND belonging_group={group_id}"
-            cursor.execute(sql)
-            result = cursor.fetchone()
-            
-            if result:
-                end_time = datetime.datetime.fromisoformat(result[0]).timestamp()
-                if current_time < end_time:
-                    remaining_time = int(end_time - current_time)
-                    hours = remaining_time // 3600
-                    minutes = (remaining_time % 3600) // 60
-                    cd_info += f"CD中，还需等待{hours}小时{minutes}分钟"
-                    
-                    # 更新内存中的CD记录
-                    special_resource_cd[(group_id, user_id)] = end_time
-                else:
-                    cd_info += "可以产出"
+        sql = f"SELECT end_time FROM special_resource_cd WHERE uid={user_id} AND belonging_group={group_id}"
+        result = db_tool.execute_one(sql)
+        
+        if result:
+            end_time = datetime.datetime.fromisoformat(result[0]).timestamp()
+            if current_time < end_time:
+                remaining_time = int(end_time - current_time)
+                hours = remaining_time // 3600
+                minutes = (remaining_time % 3600) // 60
+                cd_info += f"CD中，还需等待{hours}小时{minutes}分钟"
+                
+                # 更新内存中的CD记录
+                special_resource_cd[(group_id, user_id)] = end_time
             else:
                 cd_info += "可以产出"
-        finally:
-            if conn:
-                conn.close()
+        else:
+            cd_info += "可以产出"
     
     info += cd_info
     

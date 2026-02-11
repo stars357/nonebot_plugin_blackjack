@@ -7,8 +7,8 @@ from typing import Dict, List, Tuple, Optional, Union
 from nonebot import require, get_bot
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent
 
-# 导入公共数据库连接池
-from .db import db_pool
+# 导入公共数据库工具
+from .db import db_tool
 
 from .resource import (
     get_user_resource, update_user_resource, RESOURCE_FOOD, RESOURCE_WOOD, RESOURCE_ORE,
@@ -49,42 +49,34 @@ EVENT_TRIGGER_PROBABILITY = 0.1
 
 def init_event_db():
     """初始化事件数据库"""
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        
-        # 创建事件记录表
-        sql = """
-        CREATE TABLE IF NOT EXISTS event_records (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            belonging_group INTEGER NOT NULL,
-            event_type INTEGER NOT NULL,  -- 0: 自然灾害, 1: 市场事件, 2: 特殊事件, 3: 贫富事件, 4: 通胀事件
-            event_subtype INTEGER NOT NULL,
-            start_time TIMESTAMP NOT NULL,
-            end_time TIMESTAMP NOT NULL,
-            effect_value REAL NOT NULL,
-            is_active INTEGER NOT NULL DEFAULT 1
-        )
-        """
-        cursor.execute(sql)
-        
-        # 创建富豪榜表
-        sql = """
-        CREATE TABLE IF NOT EXISTS wealth_ranking (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            belonging_group INTEGER NOT NULL,
-            uid INTEGER NOT NULL,
-            rank INTEGER NOT NULL,
-            total_wealth REAL NOT NULL,
-            update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(belonging_group, uid)
-        )
-        """
-        cursor.execute(sql)
-        
-        conn.commit()
-    finally:
-        db_pool.return_connection(conn)
+    # 创建事件记录表
+    sql = """
+    CREATE TABLE IF NOT EXISTS event_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        belonging_group INTEGER NOT NULL,
+        event_type INTEGER NOT NULL,  -- 0: 自然灾害, 1: 市场事件, 2: 特殊事件, 3: 贫富事件, 4: 通胀事件
+        event_subtype INTEGER NOT NULL,
+        start_time TIMESTAMP NOT NULL,
+        end_time TIMESTAMP NOT NULL,
+        effect_value REAL NOT NULL,
+        is_active INTEGER NOT NULL DEFAULT 1
+    )
+    """
+    db_tool.execute_update(sql)
+    
+    # 创建富豪榜表
+    sql = """
+    CREATE TABLE IF NOT EXISTS wealth_ranking (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        belonging_group INTEGER NOT NULL,
+        uid INTEGER NOT NULL,
+        rank INTEGER NOT NULL,
+        total_wealth REAL NOT NULL,
+        update_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(belonging_group, uid)
+    )
+    """
+    db_tool.execute_update(sql)
 
 def get_active_events(group_id: int) -> Dict[int, Dict[str, any]]:
     """获取群组当前活跃的事件"""
@@ -94,29 +86,23 @@ def get_active_events(group_id: int) -> Dict[int, Dict[str, any]]:
     
     # 从数据库加载活跃事件
     init_event_db()
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        
-        now = datetime.datetime.now().isoformat()
-        sql = f"SELECT event_type, event_subtype, end_time, effect_value FROM event_records WHERE belonging_group={group_id} AND is_active=1 AND end_time > '{now}'"
-        cursor.execute(sql)
-        results = cursor.fetchall()
-        
-        # 初始化群组事件状态
-        event_status[group_id] = {}
-        
-        # 加载活跃事件
-        for event_type, event_subtype, end_time, effect_value in results:
-            event_status[group_id][event_type] = {
-                "type": event_subtype,
-                "end_time": datetime.datetime.fromisoformat(end_time),
-                "effect": effect_value
-            }
-        
-        return event_status[group_id]
-    finally:
-        db_pool.return_connection(conn)
+    
+    now = datetime.datetime.now().isoformat()
+    sql = f"SELECT event_type, event_subtype, end_time, effect_value FROM event_records WHERE belonging_group={group_id} AND is_active=1 AND end_time > '{now}'"
+    results = db_tool.execute_query(sql)
+    
+    # 初始化群组事件状态
+    event_status[group_id] = {}
+    
+    # 加载活跃事件
+    for event_type, event_subtype, end_time, effect_value in results:
+        event_status[group_id][event_type] = {
+            "type": event_subtype,
+            "end_time": datetime.datetime.fromisoformat(end_time),
+            "effect": effect_value
+        }
+    
+    return event_status[group_id]
 
 def add_event(group_id: int, event_type: int, event_subtype: int, duration_minutes: int, effect_value: float) -> bool:
     """添加新事件"""
@@ -142,16 +128,8 @@ def add_event(group_id: int, event_type: int, event_subtype: int, duration_minut
     
     # 添加到数据库
     init_event_db()
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        
-        sql = f"INSERT INTO event_records (belonging_group, event_type, event_subtype, start_time, end_time, effect_value, is_active) VALUES ({group_id}, {event_type}, {event_subtype}, '{start_time.isoformat()}', '{end_time.isoformat()}', {effect_value}, 1)"
-        cursor.execute(sql)
-        
-        conn.commit()
-    finally:
-        db_pool.return_connection(conn)
+    sql = f"INSERT INTO event_records (belonging_group, event_type, event_subtype, start_time, end_time, effect_value, is_active) VALUES ({group_id}, {event_type}, {event_subtype}, '{start_time.isoformat()}', '{end_time.isoformat()}', {effect_value}, 1)"
+    db_tool.execute_update(sql)
     
     return True
 
@@ -167,17 +145,9 @@ def end_event(group_id: int, event_type: int) -> bool:
     
     # 更新数据库
     init_event_db()
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        
-        now = datetime.datetime.now().isoformat()
-        sql = f"UPDATE event_records SET is_active=0, end_time='{now}' WHERE belonging_group={group_id} AND event_type={event_type} AND is_active=1"
-        cursor.execute(sql)
-        
-        conn.commit()
-    finally:
-        db_pool.return_connection(conn)
+    now = datetime.datetime.now().isoformat()
+    sql = f"UPDATE event_records SET is_active=0, end_time='{now}' WHERE belonging_group={group_id} AND event_type={event_type} AND is_active=1"
+    db_tool.execute_update(sql)
     
     return True
 
@@ -336,17 +306,9 @@ async def trigger_inflation_event(group_id: int) -> str:
     """触发通胀事件（银行遭劫匪）"""
     # 获取所有有银行存款的用户
     init_event_db()
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        
-        sql = f"SELECT uid FROM bank_accounts WHERE belonging_group={group_id} AND balance > 0"
-        cursor.execute(sql)
-        users = cursor.fetchall()
-        
-        return users
-    finally:
-        db_pool.return_connection(conn)
+    
+    sql = f"SELECT uid FROM bank_accounts WHERE belonging_group={group_id} AND balance > 0"
+    users = db_tool.execute_query(sql)
     
     if not users:
         return "【通胀事件】银行遭到劫匪袭击，但没有人有存款，劫匪空手而归！"
@@ -379,44 +341,32 @@ async def get_wealth_ranking(group_id: int, limit: int = 10) -> List[Tuple[int, 
     from .bank import init_bank_db
     init_bank_db()
     
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
+    # 联合查询金币和银行存款
+    sql = f"""
+    SELECT s.uid, s.points + COALESCE(b.balance, 0) as total_wealth 
+    FROM sign_in s 
+    LEFT JOIN bank_accounts b ON s.uid = b.uid AND s.belonging_group = b.belonging_group 
+    WHERE s.belonging_group = {group_id} 
+    ORDER BY total_wealth DESC 
+    LIMIT {limit}
+    """
+    results = db_tool.execute_query(sql)
+    
+    # 更新富豪榜数据库
+    now = datetime.datetime.now().isoformat()
+    for rank, (uid, total_wealth) in enumerate(results, 1):
+        # 检查是否已有记录
+        check_sql = f"SELECT id FROM wealth_ranking WHERE belonging_group={group_id} AND uid={uid}"
+        result = db_tool.execute_one(check_sql)
         
-        # 联合查询金币和银行存款
-        sql = f"""
-        SELECT s.uid, s.points + COALESCE(b.balance, 0) as total_wealth 
-        FROM sign_in s 
-        LEFT JOIN bank_accounts b ON s.uid = b.uid AND s.belonging_group = b.belonging_group 
-        WHERE s.belonging_group = {group_id} 
-        ORDER BY total_wealth DESC 
-        LIMIT {limit}
-        """
-        cursor.execute(sql)
-        results = cursor.fetchall()
+        if result:
+            # 更新记录
+            update_sql = f"UPDATE wealth_ranking SET rank={rank}, total_wealth={total_wealth}, update_time='{now}' WHERE belonging_group={group_id} AND uid={uid}"
+        else:
+            # 创建新记录
+            update_sql = f"INSERT INTO wealth_ranking (belonging_group, uid, rank, total_wealth, update_time) VALUES ({group_id}, {uid}, {rank}, {total_wealth}, '{now}')"
         
-        # 更新富豪榜数据库
-        now = datetime.datetime.now().isoformat()
-        for rank, (uid, total_wealth) in enumerate(results, 1):
-            # 检查是否已有记录
-            sql = f"SELECT id FROM wealth_ranking WHERE belonging_group={group_id} AND uid={uid}"
-            cursor.execute(sql)
-            result = cursor.fetchone()
-            
-            if result:
-                # 更新记录
-                sql = f"UPDATE wealth_ranking SET rank={rank}, total_wealth={total_wealth}, update_time='{now}' WHERE belonging_group={group_id} AND uid={uid}"
-            else:
-                # 创建新记录
-                sql = f"INSERT INTO wealth_ranking (belonging_group, uid, rank, total_wealth, update_time) VALUES ({group_id}, {uid}, {rank}, {total_wealth}, '{now}')"
-            
-            cursor.execute(sql)
-        
-        conn.commit()
-        
-        return results
-    finally:
-        db_pool.return_connection(conn)
+        db_tool.execute_update(update_sql)
     
     # 更新富豪榜特权
     update_wealth_rank_privileges(group_id, results)

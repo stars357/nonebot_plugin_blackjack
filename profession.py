@@ -15,8 +15,8 @@ from .common import (
     TOOL_DURABILITY, MAX_STAMINA, RESOURCE_STAMINA_COST, RESOURCE_OUTPUT
 )
 
-# 导入公共数据库连接池
-from .db import db_pool
+# 导入公共数据库工具
+from .db import db_tool
 
 # 导入公共缓存模块
 from .cache import cache_manager
@@ -65,80 +65,72 @@ async def schedule_clear_profession_cache():
 
 def init_profession_db():
     """初始化职业系统数据库"""
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        
-        # 创建用户职业表
-        sql = """
-        CREATE TABLE IF NOT EXISTS user_profession (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            uid INTEGER NOT NULL,
-            belonging_group INTEGER NOT NULL,
-            profession INTEGER NOT NULL DEFAULT -1,  -- -1: 无职业, 0: 牛马, 1: 矿工, 2: 农夫, 3: 伐木工, 4: 铁匠
-            last_change_date DATE,                  -- 上次更换职业的日期
-            working_hours INTEGER DEFAULT 0,        -- 打工累计小时数（仅牛马职业）
-            hourly_wage INTEGER DEFAULT 10,         -- 每小时工资（仅牛马职业）
-            UNIQUE(uid, belonging_group)
-        )
-        """
-        cursor.execute(sql)
-        
-        # 创建用户工具表（扩展现有表，添加耐久度）
-        sql = """
-        CREATE TABLE IF NOT EXISTS user_tool_durability (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            uid INTEGER NOT NULL,
-            belonging_group INTEGER NOT NULL,
-            tool_type INTEGER NOT NULL,  -- 0: 铁质工具, 1: 精金工具, 2: 强化合金工具, 3: 强化合金工具【不毁】
-            tool_category INTEGER NOT NULL, -- 0: 镐, 1: 锄, 2: 斧
-            durability INTEGER NOT NULL,  -- 剩余耐久度
-            UNIQUE(uid, belonging_group, tool_type, tool_category)
-        )
-        """
-        cursor.execute(sql)
-        
-        # 创建特殊资源表
-        sql = """
-        CREATE TABLE IF NOT EXISTS special_resources (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            uid INTEGER NOT NULL,
-            belonging_group INTEGER NOT NULL,
-            resource_type INTEGER NOT NULL,  -- 0: 海蓝宝石, 1: 超级植株, 2: 恶魔树枝干
-            amount INTEGER NOT NULL DEFAULT 0,
-            UNIQUE(uid, belonging_group, resource_type)
-        )
-        """
-        cursor.execute(sql)
-        
-        # 创建职业切换CD表
-        sql = """
-        CREATE TABLE IF NOT EXISTS profession_change_cd (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            uid INTEGER NOT NULL,
-            belonging_group INTEGER NOT NULL,
-            next_change_date DATE NOT NULL,
-            UNIQUE(uid, belonging_group)
-        )
-        """
-        cursor.execute(sql)
-        
-        # 创建打工状态表
-        sql = """
-        CREATE TABLE IF NOT EXISTS working_status (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            uid INTEGER NOT NULL,
-            belonging_group INTEGER NOT NULL,
-            start_time TIMESTAMP NOT NULL,
-            hourly_wage INTEGER NOT NULL,
-            UNIQUE(uid, belonging_group)
-        )
-        """
-        cursor.execute(sql)
-        
-        conn.commit()
-    finally:
-        db_pool.return_connection(conn)
+    # 创建用户职业表
+    sql = """
+    CREATE TABLE IF NOT EXISTS user_profession (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uid INTEGER NOT NULL,
+        belonging_group INTEGER NOT NULL,
+        profession INTEGER NOT NULL DEFAULT -1,  -- -1: 无职业, 0: 牛马, 1: 矿工, 2: 农夫, 3: 伐木工, 4: 铁匠
+        last_change_date DATE,                  -- 上次更换职业的日期
+        working_hours INTEGER DEFAULT 0,        -- 打工累计小时数（仅牛马职业）
+        hourly_wage INTEGER DEFAULT 10,         -- 每小时工资（仅牛马职业）
+        UNIQUE(uid, belonging_group)
+    )
+    """
+    db_tool.execute_update(sql)
+    
+    # 创建用户工具表（扩展现有表，添加耐久度）
+    sql = """
+    CREATE TABLE IF NOT EXISTS user_tool_durability (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uid INTEGER NOT NULL,
+        belonging_group INTEGER NOT NULL,
+        tool_type INTEGER NOT NULL,  -- 0: 铁质工具, 1: 精金工具, 2: 强化合金工具, 3: 强化合金工具【不毁】
+        tool_category INTEGER NOT NULL, -- 0: 镐, 1: 锄, 2: 斧
+        durability INTEGER NOT NULL,  -- 剩余耐久度
+        UNIQUE(uid, belonging_group, tool_type, tool_category)
+    )
+    """
+    db_tool.execute_update(sql)
+    
+    # 创建特殊资源表
+    sql = """
+    CREATE TABLE IF NOT EXISTS special_resources (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uid INTEGER NOT NULL,
+        belonging_group INTEGER NOT NULL,
+        resource_type INTEGER NOT NULL,  -- 0: 海蓝宝石, 1: 超级植株, 2: 恶魔树枝干
+        amount INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(uid, belonging_group, resource_type)
+    )
+    """
+    db_tool.execute_update(sql)
+    
+    # 创建职业切换CD表
+    sql = """
+    CREATE TABLE IF NOT EXISTS profession_change_cd (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uid INTEGER NOT NULL,
+        belonging_group INTEGER NOT NULL,
+        next_change_date DATE NOT NULL,
+        UNIQUE(uid, belonging_group)
+    )
+    """
+    db_tool.execute_update(sql)
+    
+    # 创建打工状态表
+    sql = """
+    CREATE TABLE IF NOT EXISTS working_status (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uid INTEGER NOT NULL,
+        belonging_group INTEGER NOT NULL,
+        start_time TIMESTAMP NOT NULL,
+        hourly_wage INTEGER NOT NULL,
+        UNIQUE(uid, belonging_group)
+    )
+    """
+    db_tool.execute_update(sql)
 
 def get_user_profession(group_id: int, user_id: int) -> int:
     """获取用户职业"""
@@ -149,27 +141,20 @@ def get_user_profession(group_id: int, user_id: int) -> int:
         return profession
     
     init_profession_db()
-    conn = db_pool.get_connection()
-    cursor = conn.cursor()
-    
     sql = f"SELECT profession FROM user_profession WHERE uid={user_id} AND belonging_group={group_id}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
+    result = db_tool.execute_query(sql)
     
-    if result is None:
+    if not result:
         # 创建新记录，默认无职业
         sql = f"INSERT INTO user_profession (uid, belonging_group, profession) VALUES ({user_id}, {group_id}, {PROF_NONE})"
-        cursor.execute(sql)
-        conn.commit()
+        db_tool.execute_update(sql)
         profession = PROF_NONE
     else:
-        profession = result[0]
+        profession = result[0][0]
     
     # 更新缓存
     cache_manager.set_cached_value("user_profession_cache", cache_key, profession)
     
-    cursor.close()
-    db_pool.return_connection(conn)
     return profession
 
 def check_profession_change_cd(group_id: int, user_id: int) -> Tuple[bool, str]:
@@ -187,40 +172,26 @@ def check_profession_change_cd(group_id: int, user_id: int) -> Tuple[bool, str]:
     
     # 检查数据库
     init_profession_db()
-    conn = db_pool.get_connection()
-    cursor = conn.cursor()
-    
     sql = f"SELECT next_change_date FROM profession_change_cd WHERE uid={user_id} AND belonging_group={group_id}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
+    result = db_tool.execute_query(sql)
     
-    if result is None:
+    if not result:
         # 没有CD记录
-        cursor.close()
-        db_pool.return_connection(conn)
         return True, ""
     else:
-        next_change_date = datetime.datetime.strptime(result[0], "%Y-%m-%d").date()
+        next_change_date = datetime.datetime.strptime(result[0][0], "%Y-%m-%d").date()
         today = datetime.datetime.now().date()
         
         if today < next_change_date:
             # 仍在CD期内
             days_remaining = (next_change_date - today).days
-            
             # 更新内存记录
-            next_change_time = datetime.datetime.combine(next_change_date, datetime.time())
-            profession_change_cd[(group_id, user_id)] = next_change_time
-            
-            cursor.close()
-            db_pool.return_connection(conn)
+            profession_change_cd[(group_id, user_id)] = datetime.datetime.combine(next_change_date, datetime.time.min)
             return False, f"职业切换CD中，还需等待{days_remaining}天"
         else:
             # CD已结束，删除记录
             sql = f"DELETE FROM profession_change_cd WHERE uid={user_id} AND belonging_group={group_id}"
-            cursor.execute(sql)
-            conn.commit()
-            cursor.close()
-            db_pool.return_connection(conn)
+            db_tool.execute_update(sql)
             return True, ""
 
 def set_profession_change_cd(group_id: int, user_id: int) -> None:
@@ -234,12 +205,9 @@ def set_profession_change_cd(group_id: int, user_id: int) -> None:
     
     # 更新数据库
     init_profession_db()
-    conn = db_pool.get_connection()
-    cursor = conn.cursor()
     
     sql = f"SELECT id FROM profession_change_cd WHERE uid={user_id} AND belonging_group={group_id}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
+    result = db_tool.execute_one(sql)
     
     if result is None:
         # 创建新记录
@@ -247,11 +215,7 @@ def set_profession_change_cd(group_id: int, user_id: int) -> None:
     else:
         # 更新记录
         sql = f"UPDATE profession_change_cd SET next_change_date='{next_change_date.isoformat()}' WHERE uid={user_id} AND belonging_group={group_id}"
-    
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    db_pool.return_connection(conn)
+    db_tool.execute_update(sql)
 
 def change_profession(group_id: int, user_id: int, new_profession: int) -> str:
     """切换职业"""
@@ -274,25 +238,18 @@ def change_profession(group_id: int, user_id: int, new_profession: int) -> str:
     
     # 更新职业
     init_profession_db()
-    conn = db_pool.get_connection()
-    cursor = conn.cursor()
     
     today = datetime.datetime.now().date().isoformat()
     
     if current_profession == PROF_NONE:
         # 首次选择职业，不设置CD
         sql = f"UPDATE user_profession SET profession={new_profession}, last_change_date='{today}' WHERE uid={user_id} AND belonging_group={group_id}"
-        cursor.execute(sql)
-        conn.commit()
+        db_tool.execute_update(sql)
     else:
         # 切换职业，设置CD
         sql = f"UPDATE user_profession SET profession={new_profession}, last_change_date='{today}' WHERE uid={user_id} AND belonging_group={group_id}"
-        cursor.execute(sql)
-        conn.commit()
+        db_tool.execute_update(sql)
         set_profession_change_cd(group_id, user_id)
-    
-    cursor.close()
-    db_pool.return_connection(conn)
     
     # 清除缓存
     cache_key = (group_id, user_id)
@@ -322,27 +279,20 @@ def get_special_resource(group_id: int, user_id: int, resource_type: int) -> int
         return amount
     
     init_profession_db()
-    conn = db_pool.get_connection()
-    cursor = conn.cursor()
     
     sql = f"SELECT amount FROM special_resources WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
+    result = db_tool.execute_one(sql)
     
     if result is None:
         # 创建新记录
         sql = f"INSERT INTO special_resources (uid, belonging_group, resource_type, amount) VALUES ({user_id}, {group_id}, {resource_type}, 0)"
-        cursor.execute(sql)
-        conn.commit()
+        db_tool.execute_update(sql)
         amount = 0
     else:
         amount = result[0]
     
     # 更新缓存
     cache_manager.set_cached_value("special_resource_cache", cache_key, amount)
-    
-    cursor.close()
-    db_pool.return_connection(conn)
     return amount
 
 def update_special_resource(group_id: int, user_id: int, resource_type: int, amount: int) -> None:
@@ -355,12 +305,9 @@ def update_special_resource(group_id: int, user_id: int, resource_type: int, amo
     cache_manager.set_cached_value("special_resource_cache", cache_key, amount)
     
     init_profession_db()
-    conn = db_pool.get_connection()
-    cursor = conn.cursor()
     
     sql = f"SELECT id FROM special_resources WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
+    result = db_tool.execute_one(sql)
     
     if result is None:
         # 创建新记录
@@ -369,10 +316,7 @@ def update_special_resource(group_id: int, user_id: int, resource_type: int, amo
         # 更新记录
         sql = f"UPDATE special_resources SET amount={amount} WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type}"
     
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    db_pool.return_connection(conn)
+    db_tool.execute_update(sql)
 
 def get_tool_durability(group_id: int, user_id: int, tool_type: int, tool_category: int) -> int:
     """获取工具耐久度"""
@@ -383,12 +327,9 @@ def get_tool_durability(group_id: int, user_id: int, tool_type: int, tool_catego
         return durability
     
     init_profession_db()
-    conn = db_pool.get_connection()
-    cursor = conn.cursor()
     
     sql = f"SELECT durability FROM user_tool_durability WHERE uid={user_id} AND belonging_group={group_id} AND tool_type={tool_type} AND tool_category={tool_category}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
+    result = db_tool.execute_one(sql)
     
     if result is None:
         # 没有该工具
@@ -398,9 +339,6 @@ def get_tool_durability(group_id: int, user_id: int, tool_type: int, tool_catego
     
     # 更新缓存
     cache_manager.set_cached_value("tool_durability_cache", cache_key, durability)
-    
-    cursor.close()
-    db_pool.return_connection(conn)
     return durability
 
 def update_tool_durability(group_id: int, user_id: int, tool_type: int, tool_category: int, durability: int) -> None:
@@ -414,17 +352,14 @@ def update_tool_durability(group_id: int, user_id: int, tool_type: int, tool_cat
     cache_manager.set_cached_value("tool_durability_cache", cache_key, durability)
     
     init_profession_db()
-    conn = db_pool.get_connection()
-    cursor = conn.cursor()
     
     sql = f"SELECT id FROM user_tool_durability WHERE uid={user_id} AND belonging_group={group_id} AND tool_type={tool_type} AND tool_category={tool_category}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
+    result = db_tool.execute_one(sql)
     
     if result is None and durability > 0:
         # 创建新记录
         sql = f"INSERT INTO user_tool_durability (uid, belonging_group, tool_type, tool_category, durability) VALUES ({user_id}, {group_id}, {tool_type}, {tool_category}, {durability})"
-        cursor.execute(sql)
+        db_tool.execute_update(sql)
     elif result is not None:
         if durability <= 0:
             # 删除记录
@@ -432,11 +367,7 @@ def update_tool_durability(group_id: int, user_id: int, tool_type: int, tool_cat
         else:
             # 更新记录
             sql = f"UPDATE user_tool_durability SET durability={durability} WHERE uid={user_id} AND belonging_group={group_id} AND tool_type={tool_type} AND tool_category={tool_category}"
-        cursor.execute(sql)
-    
-    conn.commit()
-    cursor.close()
-    db_pool.return_connection(conn)
+        db_tool.execute_update(sql)
 
 def get_best_tool(group_id: int, user_id: int, tool_category: int) -> Tuple[int, int]:
     """获取用户最好的工具及其耐久度"""
@@ -502,12 +433,9 @@ def start_working(group_id: int, user_id: int) -> str:
     
     # 获取每小时工资
     init_profession_db()
-    conn = db_pool.get_connection()
-    cursor = conn.cursor()
     
     sql = f"SELECT working_hours, hourly_wage FROM user_profession WHERE uid={user_id} AND belonging_group={group_id}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
+    result = db_tool.execute_one(sql)
     
     working_hours = result[0] if result else 0
     hourly_wage = result[1] if result else 10
@@ -518,10 +446,7 @@ def start_working(group_id: int, user_id: int) -> str:
     
     # 更新数据库
     sql = f"INSERT OR REPLACE INTO working_status (uid, belonging_group, start_time, hourly_wage) VALUES ({user_id}, {group_id}, '{datetime.datetime.now().isoformat()}', {hourly_wage})"
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    db_pool.return_connection(conn)
+    db_tool.execute_update(sql)
     
     return f"开始打工！当前时薪：{hourly_wage}金币/小时\n累计打工时长：{working_hours}小时"
 
@@ -531,25 +456,17 @@ def end_working(group_id: int, user_id: int) -> str:
     if (group_id, user_id) not in working_status:
         # 检查数据库
         init_profession_db()
-        conn = db_pool.get_connection()
-        cursor = conn.cursor()
         
         sql = f"SELECT start_time, hourly_wage FROM working_status WHERE uid={user_id} AND belonging_group={group_id}"
-        cursor.execute(sql)
-        result = cursor.fetchone()
+        result = db_tool.execute_one(sql)
         
         if result is None:
-            cursor.close()
-            db_pool.return_connection(conn)
             return "你没有在打工"
         
         # 恢复打工状态
         start_time = datetime.datetime.fromisoformat(result[0]).timestamp()
         hourly_wage = result[1]
         working_status[(group_id, user_id)] = {"start_time": start_time, "hourly_wage": hourly_wage}
-        
-        cursor.close()
-        db_pool.return_connection(conn)
     
     # 计算打工时长和工资
     start_time = working_status[(group_id, user_id)]["start_time"]
@@ -570,12 +487,9 @@ def end_working(group_id: int, user_id: int) -> str:
     
     # 更新累计打工时长
     init_profession_db()
-    conn = db_pool.get_connection()
-    cursor = conn.cursor()
     
     sql = f"SELECT working_hours FROM user_profession WHERE uid={user_id} AND belonging_group={group_id}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
+    result = db_tool.execute_one(sql)
     
     total_working_hours = (result[0] if result else 0) + hours_worked_int
     
@@ -590,15 +504,11 @@ def end_working(group_id: int, user_id: int) -> str:
     
     # 更新数据库
     sql = f"UPDATE user_profession SET working_hours={total_working_hours}, hourly_wage={new_hourly_wage} WHERE uid={user_id} AND belonging_group={group_id}"
-    cursor.execute(sql)
+    db_tool.execute_update(sql)
     
     # 删除打工状态
     sql = f"DELETE FROM working_status WHERE uid={user_id} AND belonging_group={group_id}"
-    cursor.execute(sql)
-    
-    conn.commit()
-    cursor.close()
-    db_pool.return_connection(conn)
+    db_tool.execute_update(sql)
     
     # 删除内存中的打工状态
     del working_status[(group_id, user_id)]
@@ -621,16 +531,11 @@ def refresh_hourly_wage(group_id: int, user_id: int) -> str:
     
     # 获取累计打工时间
     init_profession_db()
-    conn = db_pool.get_connection()
-    cursor = conn.cursor()
     
     sql = f"SELECT working_hours FROM user_profession WHERE uid={user_id} AND belonging_group={group_id}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
+    result = db_tool.execute_one(sql)
     
     if result is None:
-        cursor.close()
-        db_pool.return_connection(conn)
         return "未找到用户职业信息"
     
     total_working_hours = result[0] if result[0] is not None else 0
@@ -646,23 +551,15 @@ def refresh_hourly_wage(group_id: int, user_id: int) -> str:
     
     # 更新数据库中的时薪
     sql = f"UPDATE user_profession SET hourly_wage={correct_hourly_wage} WHERE uid={user_id} AND belonging_group={group_id}"
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    db_pool.return_connection(conn)
+    db_tool.execute_update(sql)
     
     # 如果用户正在打工，也需要更新打工状态中的时薪
     if (group_id, user_id) in working_status:
         working_status[(group_id, user_id)]["hourly_wage"] = correct_hourly_wage
         
         # 更新数据库中的打工状态
-        conn = db_pool.get_connection()
-        cursor = conn.cursor()
         sql = f"UPDATE working_status SET hourly_wage={correct_hourly_wage} WHERE uid={user_id} AND belonging_group={group_id}"
-        cursor.execute(sql)
-        conn.commit()
-        cursor.close()
-        db_pool.return_connection(conn)
+        db_tool.execute_update(sql)
     
     return f"工资刷新成功！\n累计打工时长：{total_working_hours}小时\n工资等级：{wage_level}级\n当前时薪：{correct_hourly_wage}金币/小时"
 
@@ -971,18 +868,12 @@ def get_profession_info(group_id: int, user_id: int) -> str:
     if profession == PROF_WORKER:
         # 牛马职业：显示打工信息
         init_profession_db()
-        conn = db_pool.get_connection()
-        cursor = conn.cursor()
         
         sql = f"SELECT working_hours, hourly_wage FROM user_profession WHERE uid={user_id} AND belonging_group={group_id}"
-        cursor.execute(sql)
-        result = cursor.fetchone()
+        result = db_tool.execute_one(sql)
         
         working_hours = result[0] if result else 0
         hourly_wage = result[1] if result else 10
-        
-        cursor.close()
-        db_pool.return_connection(conn)
         
         message += f"\n===== 牛马职业信息 =====\n"
         message += f"累计打工时长：{working_hours}小时\n"

@@ -5,8 +5,8 @@ from .sign import get_point, update_point
 from .resource import get_user_resource, update_user_resource, RESOURCE_PRICES
 from .market import get_resource_price_info
 
-# 导入公共数据库连接池
-from .db import db_pool
+# 导入公共数据库工具
+from .db import db_tool
 
 # 导入公共缓存模块
 from .cache import cache_manager
@@ -40,38 +40,30 @@ alliance_transfer_requests: Dict[int, Dict[int, Dict[str, int]]] = {}
 
 def init_alliance_db():
     """初始化联盟数据库"""
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        
-        # 创建联盟成员表
-        sql = """
-        CREATE TABLE IF NOT EXISTS alliance_members (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            uid INTEGER NOT NULL,
-            belonging_group INTEGER NOT NULL,
-            alliance_type INTEGER NOT NULL DEFAULT -1,  -- -1: 无联盟, 0: 商业联盟, 1: 军事同盟, 2: 工农联合
-            join_date DATE NOT NULL,
-            UNIQUE(uid, belonging_group)
-        )
-        """
-        cursor.execute(sql)
-        
-        # 创建联盟领袖表
-        sql = """
-        CREATE TABLE IF NOT EXISTS alliance_leaders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            belonging_group INTEGER NOT NULL,
-            alliance_type INTEGER NOT NULL,  -- 0: 商业联盟, 1: 军事同盟, 2: 工农联合
-            leader_id INTEGER NOT NULL,
-            UNIQUE(belonging_group, alliance_type)
-        )
-        """
-        cursor.execute(sql)
-        
-        conn.commit()
-    finally:
-        db_pool.return_connection(conn)
+    # 创建联盟成员表
+    sql = """
+    CREATE TABLE IF NOT EXISTS alliance_members (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        uid INTEGER NOT NULL,
+        belonging_group INTEGER NOT NULL,
+        alliance_type INTEGER NOT NULL DEFAULT -1,  -- -1: 无联盟, 0: 商业联盟, 1: 军事同盟, 2: 工农联合
+        join_date DATE NOT NULL,
+        UNIQUE(uid, belonging_group)
+    )
+    """
+    db_tool.execute_update(sql)
+    
+    # 创建联盟领袖表
+    sql = """
+    CREATE TABLE IF NOT EXISTS alliance_leaders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        belonging_group INTEGER NOT NULL,
+        alliance_type INTEGER NOT NULL,  -- 0: 商业联盟, 1: 军事同盟, 2: 工农联合
+        leader_id INTEGER NOT NULL,
+        UNIQUE(belonging_group, alliance_type)
+    )
+    """
+    db_tool.execute_update(sql)
 
 def get_user_alliance(group_id: int, user_id: int) -> int:
     """获取用户所属联盟"""
@@ -82,29 +74,23 @@ def get_user_alliance(group_id: int, user_id: int) -> int:
         return cached_value
     
     init_alliance_db()
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        
-        sql = f"SELECT alliance_type FROM alliance_members WHERE uid={user_id} AND belonging_group={group_id}"
-        cursor.execute(sql)
-        result = cursor.fetchone()
-        
-        if result is None:
-            # 创建新记录，默认无联盟
-            sql = f"INSERT INTO alliance_members (uid, belonging_group, alliance_type, join_date) VALUES ({user_id}, {group_id}, {ALLIANCE_NONE}, '{datetime.date.today().isoformat()}')"
-            cursor.execute(sql)
-            conn.commit()
-            alliance_type = ALLIANCE_NONE
-        else:
-            alliance_type = result[0]
-        
-        # 更新缓存
-        cache_manager.set_cached_value(cache_key, alliance_type)
-        
-        return alliance_type
-    finally:
-        db_pool.return_connection(conn)
+    
+    # 从数据库获取
+    sql = f"SELECT alliance_type FROM alliance_members WHERE uid={user_id} AND belonging_group={group_id}"
+    result = db_tool.execute_one(sql)
+    
+    if result is None:
+        # 创建新记录，默认无联盟
+        sql = f"INSERT INTO alliance_members (uid, belonging_group, alliance_type, join_date) VALUES ({user_id}, {group_id}, {ALLIANCE_NONE}, '{datetime.date.today().isoformat()}')"
+        db_tool.execute_update(sql)
+        alliance_type = ALLIANCE_NONE
+    else:
+        alliance_type = result[0]
+    
+    # 更新缓存
+    cache_manager.set_cached_value(cache_key, alliance_type)
+    
+    return alliance_type
 
 def join_alliance(group_id: int, user_id: int, alliance_type: int) -> str:
     """加入联盟"""
@@ -125,51 +111,43 @@ def join_alliance(group_id: int, user_id: int, alliance_type: int) -> str:
     
     # 加入新联盟
     init_alliance_db()
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
+    
+    today = datetime.date.today().isoformat()
+    sql = f"UPDATE alliance_members SET alliance_type={alliance_type}, join_date='{today}' WHERE uid={user_id} AND belonging_group={group_id}"
+    db_tool.execute_update(sql)
+    
+    # 检查是否需要设置联盟领袖
+    sql = f"SELECT leader_id FROM alliance_leaders WHERE belonging_group={group_id} AND alliance_type={alliance_type}"
+    result = db_tool.execute_one(sql)
+    
+    if result is None:
+        # 该联盟还没有领袖，将当前用户设为领袖
+        sql = f"INSERT INTO alliance_leaders (belonging_group, alliance_type, leader_id) VALUES ({group_id}, {alliance_type}, {user_id})"
+        db_tool.execute_update(sql)
         
-        today = datetime.date.today().isoformat()
-        sql = f"UPDATE alliance_members SET alliance_type={alliance_type}, join_date='{today}' WHERE uid={user_id} AND belonging_group={group_id}"
-        cursor.execute(sql)
-        conn.commit()
-        
-        # 检查是否需要设置联盟领袖
-        sql = f"SELECT leader_id FROM alliance_leaders WHERE belonging_group={group_id} AND alliance_type={alliance_type}"
-        cursor.execute(sql)
-        result = cursor.fetchone()
-        
-        if result is None:
-            # 该联盟还没有领袖，将当前用户设为领袖
-            sql = f"INSERT INTO alliance_leaders (belonging_group, alliance_type, leader_id) VALUES ({group_id}, {alliance_type}, {user_id})"
-            cursor.execute(sql)
-            conn.commit()
-            
-            # 更新内存中的领袖记录
-            if group_id not in alliance_leaders:
-                alliance_leaders[group_id] = {}
-            alliance_leaders[group_id][alliance_type] = user_id
-            
-            # 清除缓存
-            cache_key = f"alliance_{group_id}_{user_id}"
-            cache_manager.clear_cache(cache_key)
-            
-            return f"你已成功创建并加入{ALLIANCE_NAMES[alliance_type]}，并成为联盟领袖！"
-        
-        # 更新内存中的成员记录
-        if group_id not in alliance_members:
-            alliance_members[group_id] = {}
-        if alliance_type not in alliance_members[group_id]:
-            alliance_members[group_id][alliance_type] = []
-        alliance_members[group_id][alliance_type].append(user_id)
+        # 更新内存中的领袖记录
+        if group_id not in alliance_leaders:
+            alliance_leaders[group_id] = {}
+        alliance_leaders[group_id][alliance_type] = user_id
         
         # 清除缓存
         cache_key = f"alliance_{group_id}_{user_id}"
         cache_manager.clear_cache(cache_key)
         
-        return f"你已成功加入{ALLIANCE_NAMES[alliance_type]}！"
-    finally:
-        db_pool.return_connection(conn)
+        return f"你已成功创建并加入{ALLIANCE_NAMES[alliance_type]}，并成为联盟领袖！"
+    
+    # 更新内存中的成员记录
+    if group_id not in alliance_members:
+        alliance_members[group_id] = {}
+    if alliance_type not in alliance_members[group_id]:
+        alliance_members[group_id][alliance_type] = []
+    alliance_members[group_id][alliance_type].append(user_id)
+    
+    # 清除缓存
+    cache_key = f"alliance_{group_id}_{user_id}"
+    cache_manager.clear_cache(cache_key)
+    
+    return f"你已成功加入{ALLIANCE_NAMES[alliance_type]}！"
 
 def leave_alliance(group_id: int, user_id: int) -> str:
     """退出联盟"""
@@ -189,88 +167,66 @@ def leave_alliance(group_id: int, user_id: int) -> str:
     if not is_leader:
         # 从数据库中查询
         init_alliance_db()
-        conn = db_pool.get_connection()
-        try:
-            cursor = conn.cursor()
-            
-            sql = f"SELECT leader_id FROM alliance_leaders WHERE belonging_group={group_id} AND alliance_type={current_alliance}"
-            cursor.execute(sql)
-            result = cursor.fetchone()
-            
-            if result and result[0] == user_id:
-                is_leader = True
-        finally:
-            db_pool.return_connection(conn)
+        sql = f"SELECT leader_id FROM alliance_leaders WHERE belonging_group={group_id} AND alliance_type={current_alliance}"
+        result = db_tool.execute_one(sql)
+        
+        if result and result[0] == user_id:
+            is_leader = True
     
     if is_leader:
         return "作为联盟领袖，你不能直接退出联盟。请先将领袖职位转移给其他成员，或者解散联盟！"
     
     # 退出联盟
     init_alliance_db()
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        
-        sql = f"UPDATE alliance_members SET alliance_type={ALLIANCE_NONE} WHERE uid={user_id} AND belonging_group={group_id}"
-        cursor.execute(sql)
-        conn.commit()
-        
-        # 更新内存中的成员记录
-        if group_id in alliance_members and current_alliance in alliance_members[group_id]:
-            if user_id in alliance_members[group_id][current_alliance]:
-                alliance_members[group_id][current_alliance].remove(user_id)
-        
-        # 清除缓存
-        cache_key = f"alliance_{group_id}_{user_id}"
-        cache_manager.clear_cache(cache_key)
-        
-        return f"你已成功退出{ALLIANCE_NAMES[current_alliance]}！"
-    finally:
-        db_pool.return_connection(conn)
+    sql = f"UPDATE alliance_members SET alliance_type={ALLIANCE_NONE} WHERE uid={user_id} AND belonging_group={group_id}"
+    db_tool.execute_update(sql)
+    
+    # 更新内存中的成员记录
+    if group_id in alliance_members and current_alliance in alliance_members[group_id]:
+        if user_id in alliance_members[group_id][current_alliance]:
+            alliance_members[group_id][current_alliance].remove(user_id)
+    
+    # 清除缓存
+    cache_key = f"alliance_{group_id}_{user_id}"
+    cache_manager.clear_cache(cache_key)
+    
+    return f"你已成功退出{ALLIANCE_NAMES[current_alliance]}！"
 
 def transfer_leadership(group_id: int, current_leader_id: int, new_leader_id: int) -> str:
     """转让联盟领袖职位"""
     init_alliance_db()
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        
-        # 检查当前用户是否为领袖
-        sql = f"SELECT alliance_type FROM alliance_leaders WHERE belonging_group={group_id} AND leader_id={current_leader_id}"
-        cursor.execute(sql)
-        result = cursor.fetchone()
-        
-        if result is None:
-            return "你不是任何联盟的领袖！"
-        
-        alliance_type = result[0]
-        
-        # 检查新领袖是否在同一联盟
-        sql = f"SELECT alliance_type FROM alliance_members WHERE uid={new_leader_id} AND belonging_group={group_id}"
-        cursor.execute(sql)
-        result = cursor.fetchone()
-        
-        if result is None or result[0] != alliance_type:
-            return "新领袖不在同一联盟中！"
-        
-        # 更新领袖记录
-        sql = f"UPDATE alliance_leaders SET leader_id={new_leader_id} WHERE belonging_group={group_id} AND alliance_type={alliance_type}"
-        cursor.execute(sql)
-        conn.commit()
-        
-        # 更新内存中的领袖记录
-        if group_id in alliance_leaders and alliance_type in alliance_leaders[group_id]:
-            alliance_leaders[group_id][alliance_type] = new_leader_id
-        
-        # 清除缓存
-        cache_key1 = f"alliance_{group_id}_{current_leader_id}"
-        cache_key2 = f"alliance_{group_id}_{new_leader_id}"
-        cache_manager.clear_cache(cache_key1)
-        cache_manager.clear_cache(cache_key2)
-        
-        return f"你已成功将{ALLIANCE_NAMES[alliance_type]}的领袖职位转让给新领袖！"
-    finally:
-        db_pool.return_connection(conn)
+    
+    # 检查当前用户是否为领袖
+    sql = f"SELECT alliance_type FROM alliance_leaders WHERE belonging_group={group_id} AND leader_id={current_leader_id}"
+    result = db_tool.execute_one(sql)
+    
+    if result is None:
+        return "你不是任何联盟的领袖！"
+    
+    alliance_type = result[0]
+    
+    # 检查新领袖是否在同一联盟
+    sql = f"SELECT alliance_type FROM alliance_members WHERE uid={new_leader_id} AND belonging_group={group_id}"
+    result = db_tool.execute_one(sql)
+    
+    if result is None or result[0] != alliance_type:
+        return "新领袖不在同一联盟中！"
+    
+    # 更新领袖记录
+    sql = f"UPDATE alliance_leaders SET leader_id={new_leader_id} WHERE belonging_group={group_id} AND alliance_type={alliance_type}"
+    db_tool.execute_update(sql)
+    
+    # 更新内存中的领袖记录
+    if group_id in alliance_leaders and alliance_type in alliance_leaders[group_id]:
+        alliance_leaders[group_id][alliance_type] = new_leader_id
+    
+    # 清除缓存
+    cache_key1 = f"alliance_{group_id}_{current_leader_id}"
+    cache_key2 = f"alliance_{group_id}_{new_leader_id}"
+    cache_manager.clear_cache(cache_key1)
+    cache_manager.clear_cache(cache_key2)
+    
+    return f"你已成功将{ALLIANCE_NAMES[alliance_type]}的领袖职位转让给新领袖！"
 
 def accept_leadership(group_id: int, user_id: int) -> str:
     """接受领袖转移请求"""
@@ -284,31 +240,25 @@ def accept_leadership(group_id: int, user_id: int) -> str:
         if request["to"] == user_id:
             # 从数据库中更新领袖记录
             init_alliance_db()
-            conn = db_pool.get_connection()
-            try:
-                cursor = conn.cursor()
-                
-                sql = f"UPDATE alliance_leaders SET leader_id={user_id} WHERE belonging_group={group_id} AND alliance_type={alliance_type}"
-                cursor.execute(sql)
-                conn.commit()
-                
-                # 更新内存中的领袖记录
-                if group_id not in alliance_leaders:
-                    alliance_leaders[group_id] = {}
-                alliance_leaders[group_id][alliance_type] = user_id
-                
-                # 从内存中删除转移请求
-                del alliance_transfer_requests[group_id][alliance_type]
-                if not alliance_transfer_requests[group_id]:
-                    del alliance_transfer_requests[group_id]
-                
-                # 清除缓存
-                cache_key = f"alliance_{group_id}_{user_id}"
-                cache_manager.clear_cache(cache_key)
-                
-                return f"你已成功接受{ALLIANCE_NAMES[alliance_type]}的领袖职位！"
-            finally:
-                db_pool.return_connection(conn)
+            
+            sql = f"UPDATE alliance_leaders SET leader_id={user_id} WHERE belonging_group={group_id} AND alliance_type={alliance_type}"
+            db_tool.execute_update(sql)
+            
+            # 更新内存中的领袖记录
+            if group_id not in alliance_leaders:
+                alliance_leaders[group_id] = {}
+            alliance_leaders[group_id][alliance_type] = user_id
+            
+            # 从内存中删除转移请求
+            del alliance_transfer_requests[group_id][alliance_type]
+            if not alliance_transfer_requests[group_id]:
+                del alliance_transfer_requests[group_id]
+            
+            # 清除缓存
+            cache_key = f"alliance_{group_id}_{user_id}"
+            cache_manager.clear_cache(cache_key)
+            
+            return f"你已成功接受{ALLIANCE_NAMES[alliance_type]}的领袖职位！"
     
     return "没有待处理的领袖转移请求！"
 
@@ -326,75 +276,54 @@ def disband_alliance(group_id: int, leader_id: int) -> str:
     if not is_leader:
         # 从数据库中查询
         init_alliance_db()
-        conn = db_pool.get_connection()
-        try:
-            cursor = conn.cursor()
-            
-            sql = f"SELECT leader_id FROM alliance_leaders WHERE belonging_group={group_id} AND alliance_type={current_alliance}"
-            cursor.execute(sql)
-            result = cursor.fetchone()
-            
-            if result and result[0] == leader_id:
-                is_leader = True
-        finally:
-            db_pool.return_connection(conn)
+        sql = f"SELECT leader_id FROM alliance_leaders WHERE belonging_group={group_id} AND alliance_type={current_alliance}"
+        result = db_tool.execute_one(sql)
+        
+        if result and result[0] == leader_id:
+            is_leader = True
     
     if not is_leader:
         return "只有联盟领袖才能解散联盟！"
     
     # 从数据库中删除联盟领袖记录
     init_alliance_db()
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
+    sql = f"DELETE FROM alliance_leaders WHERE belonging_group={group_id} AND alliance_type={current_alliance}"
+    db_tool.execute_update(sql)
+    
+    # 将所有成员的联盟类型设为无联盟
+    sql = f"UPDATE alliance_members SET alliance_type={ALLIANCE_NONE} WHERE belonging_group={group_id} AND alliance_type={current_alliance}"
+    db_tool.execute_update(sql)
+    
+    # 更新内存中的记录
+    if group_id in alliance_leaders and current_alliance in alliance_leaders[group_id]:
+        del alliance_leaders[group_id][current_alliance]
+        if not alliance_leaders[group_id]:
+            del alliance_leaders[group_id]
+    
+    if group_id in alliance_members and current_alliance in alliance_members[group_id]:
+        # 清除该联盟的所有成员缓存
+        for member_id in alliance_members[group_id][current_alliance]:
+            cache_key = f"alliance_{group_id}_{member_id}"
+            cache_manager.clear_cache(cache_key)
         
-        sql = f"DELETE FROM alliance_leaders WHERE belonging_group={group_id} AND alliance_type={current_alliance}"
-        cursor.execute(sql)
-        conn.commit()
-        
-        # 将所有成员的联盟类型设为无联盟
-        sql = f"UPDATE alliance_members SET alliance_type={ALLIANCE_NONE} WHERE belonging_group={group_id} AND alliance_type={current_alliance}"
-        cursor.execute(sql)
-        conn.commit()
-        
-        # 更新内存中的记录
-        if group_id in alliance_leaders and current_alliance in alliance_leaders[group_id]:
-            del alliance_leaders[group_id][current_alliance]
-            if not alliance_leaders[group_id]:
-                del alliance_leaders[group_id]
-        
-        if group_id in alliance_members and current_alliance in alliance_members[group_id]:
-            # 清除该联盟的所有成员缓存
-            for member_id in alliance_members[group_id][current_alliance]:
-                cache_key = f"alliance_{group_id}_{member_id}"
-                cache_manager.clear_cache(cache_key)
-            
-            del alliance_members[group_id][current_alliance]
-            if not alliance_members[group_id]:
-                del alliance_members[group_id]
-        
-        # 清除当前用户的缓存
-        cache_key = f"alliance_{group_id}_{leader_id}"
-        cache_manager.clear_cache(cache_key)
-        
-        return f"你已成功解散{ALLIANCE_NAMES[current_alliance]}！"
-    finally:
-        db_pool.return_connection(conn)
+        del alliance_members[group_id][current_alliance]
+        if not alliance_members[group_id]:
+            del alliance_members[group_id]
+    
+    # 清除当前用户的缓存
+    cache_key = f"alliance_{group_id}_{leader_id}"
+    cache_manager.clear_cache(cache_key)
+    
+    return f"你已成功解散{ALLIANCE_NAMES[current_alliance]}！"
 
 def get_alliance_members(group_id: int, alliance_type: int) -> List[int]:
     """获取联盟成员列表"""
     init_alliance_db()
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        
-        sql = f"SELECT uid FROM alliance_members WHERE belonging_group={group_id} AND alliance_type={alliance_type}"
-        cursor.execute(sql)
-        members = [row[0] for row in cursor.fetchall()]
-        
-        return members
-    finally:
-        db_pool.return_connection(conn)
+    
+    sql = f"SELECT uid FROM alliance_members WHERE belonging_group={group_id} AND alliance_type={alliance_type}"
+    members = [row[0] for row in db_tool.execute_query(sql)]
+    
+    return members
 
 def get_alliance_leader(group_id: int, alliance_type: int) -> int:
     """获取联盟领袖ID"""
@@ -404,25 +333,19 @@ def get_alliance_leader(group_id: int, alliance_type: int) -> int:
     
     # 从数据库中查询
     init_alliance_db()
-    conn = db_pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        
-        sql = f"SELECT leader_id FROM alliance_leaders WHERE belonging_group={group_id} AND alliance_type={alliance_type}"
-        cursor.execute(sql)
-        result = cursor.fetchone()
-        
-        leader_id = result[0] if result else 0
-        
-        # 更新内存中的领袖记录
-        if leader_id > 0:
-            if group_id not in alliance_leaders:
-                alliance_leaders[group_id] = {}
-            alliance_leaders[group_id][alliance_type] = leader_id
-        
-        return leader_id
-    finally:
-        db_pool.return_connection(conn)
+    
+    sql = f"SELECT leader_id FROM alliance_leaders WHERE belonging_group={group_id} AND alliance_type={alliance_type}"
+    result = db_tool.execute_one(sql)
+    
+    leader_id = result[0] if result else 0
+    
+    # 更新内存中的领袖记录
+    if leader_id > 0:
+        if group_id not in alliance_leaders:
+            alliance_leaders[group_id] = {}
+        alliance_leaders[group_id][alliance_type] = leader_id
+    
+    return leader_id
 
 def get_alliance_info(group_id: int, alliance_type: int) -> str:
     """获取联盟信息"""
