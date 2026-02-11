@@ -14,6 +14,7 @@ from .common import (
     SPECIAL_BLUE_GEM, SPECIAL_SUPER_PLANT, SPECIAL_DEMON_BRANCH,
     TOOL_DURABILITY
 )
+from .db import db_pool
 
 # 商品类型常量
 ITEM_SUPREME_CARD = 0    # 至尊签到卡
@@ -85,219 +86,234 @@ market_listing_counter: Dict[int, int] = {}
 
 def init_market_db():
     """初始化市场数据库"""
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 创建物品表
-    sql = """
-    CREATE TABLE IF NOT EXISTS user_items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid INTEGER NOT NULL,
-        belonging_group INTEGER NOT NULL,
-        item_type INTEGER NOT NULL,  -- 0: 至尊签到卡, 1: 400平大别野, 2: 生产加倍卡, 3: 体力恢复卡
-        amount INTEGER NOT NULL DEFAULT 0,
-        UNIQUE(uid, belonging_group, item_type)
-    )
-    """
-    cursor.execute(sql)
-    
-    # 创建生产加倍卡使用记录表
-    sql = """
-    CREATE TABLE IF NOT EXISTS production_card_uses (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid INTEGER NOT NULL,
-        belonging_group INTEGER NOT NULL,
-        remaining_uses INTEGER NOT NULL DEFAULT 0,
-        UNIQUE(uid, belonging_group)
-    )
-    """
-    cursor.execute(sql)
-    
-    # 创建体力恢复卡购买记录表
-    sql = """
-    CREATE TABLE IF NOT EXISTS stamina_card_purchases (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid INTEGER NOT NULL,
-        belonging_group INTEGER NOT NULL,
-        purchase_date DATE NOT NULL,
-        count INTEGER NOT NULL DEFAULT 0,
-        UNIQUE(uid, belonging_group, purchase_date)
-    )
-    """
-    cursor.execute(sql)
-    
-    # 创建资源价格表
-    sql = """
-    CREATE TABLE IF NOT EXISTS resource_prices (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        belonging_group INTEGER NOT NULL,
-        resource_type INTEGER NOT NULL,  -- 0: 食物, 1: 木材, 2: 矿石
-        base_price REAL NOT NULL,
-        current_price REAL NOT NULL,
-        last_update DATE NOT NULL,
-        daily_trade_volume INTEGER NOT NULL DEFAULT 0,
-        UNIQUE(belonging_group, resource_type)
-    )
-    """
-    cursor.execute(sql)
-    
-    # 创建玩家市场挂单表
-    sql = """
-    CREATE TABLE IF NOT EXISTS market_listings (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        listing_id INTEGER NOT NULL,
-        belonging_group INTEGER NOT NULL,
-        seller_id INTEGER NOT NULL,
-        item_type INTEGER NOT NULL,  -- 0: 资源, 1: 工具, 2: 特殊材料
-        resource_type INTEGER,       -- 0: 食物, 1: 木材, 2: 矿石, NULL if item_type != 0
-        tool_type INTEGER,           -- 工具类型，NULL if item_type != 1
-        tool_category INTEGER,       -- 工具种类，NULL if item_type != 1
-        special_resource_type INTEGER, -- 特殊材料类型，NULL if item_type != 2
-        price_per_unit REAL NOT NULL,
-        quantity INTEGER NOT NULL,
-        listing_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(belonging_group, listing_id)
-    )
-    """
-    cursor.execute(sql)
-    
-    conn.commit()
-    cursor.close()
-    conn.close()
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        
+        # 创建物品表
+        sql = """
+        CREATE TABLE IF NOT EXISTS user_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid INTEGER NOT NULL,
+            belonging_group INTEGER NOT NULL,
+            item_type INTEGER NOT NULL,  -- 0: 至尊签到卡, 1: 400平大别野, 2: 生产加倍卡, 3: 体力恢复卡
+            amount INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(uid, belonging_group, item_type)
+        )
+        """
+        cursor.execute(sql)
+        
+        # 创建生产加倍卡使用记录表
+        sql = """
+        CREATE TABLE IF NOT EXISTS production_card_uses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid INTEGER NOT NULL,
+            belonging_group INTEGER NOT NULL,
+            remaining_uses INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(uid, belonging_group)
+        )
+        """
+        cursor.execute(sql)
+        
+        # 创建体力恢复卡购买记录表
+        sql = """
+        CREATE TABLE IF NOT EXISTS stamina_card_purchases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid INTEGER NOT NULL,
+            belonging_group INTEGER NOT NULL,
+            purchase_date DATE NOT NULL,
+            count INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(uid, belonging_group, purchase_date)
+        )
+        """
+        cursor.execute(sql)
+        
+        # 创建资源价格表
+        sql = """
+        CREATE TABLE IF NOT EXISTS resource_prices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            belonging_group INTEGER NOT NULL,
+            resource_type INTEGER NOT NULL,  -- 0: 食物, 1: 木材, 2: 矿石
+            base_price REAL NOT NULL,
+            current_price REAL NOT NULL,
+            last_update DATE NOT NULL,
+            daily_trade_volume INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(belonging_group, resource_type)
+        )
+        """
+        cursor.execute(sql)
+        
+        # 创建玩家市场挂单表
+        sql = """
+        CREATE TABLE IF NOT EXISTS market_listings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            listing_id INTEGER NOT NULL,
+            belonging_group INTEGER NOT NULL,
+            seller_id INTEGER NOT NULL,
+            item_type INTEGER NOT NULL,  -- 0: 资源, 1: 工具, 2: 特殊材料
+            resource_type INTEGER,       -- 0: 食物, 1: 木材, 2: 矿石, NULL if item_type != 0
+            tool_type INTEGER,           -- 工具类型，NULL if item_type != 1
+            tool_category INTEGER,       -- 工具种类，NULL if item_type != 1
+            special_resource_type INTEGER, -- 特殊材料类型，NULL if item_type != 2
+            price_per_unit REAL NOT NULL,
+            quantity INTEGER NOT NULL,
+            listing_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(belonging_group, listing_id)
+        )
+        """
+        cursor.execute(sql)
+        
+        conn.commit()
+    finally:
+        if conn:
+            conn.close()
 
 def get_user_item(group_id: int, user_id: int, item_type: int) -> int:
     """获取用户物品数量"""
     init_market_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    sql = f"SELECT amount FROM user_items WHERE uid={user_id} AND belonging_group={group_id} AND item_type={item_type}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        # 创建新记录
-        sql = f"INSERT INTO user_items (uid, belonging_group, item_type, amount) VALUES ({user_id}, {group_id}, {item_type}, 0)"
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        
+        sql = f"SELECT amount FROM user_items WHERE uid={user_id} AND belonging_group={group_id} AND item_type={item_type}"
         cursor.execute(sql)
-        conn.commit()
-        amount = 0
-    else:
-        amount = int(result[0])
-    
-    cursor.close()
-    conn.close()
-    return amount
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新记录
+            sql = f"INSERT INTO user_items (uid, belonging_group, item_type, amount) VALUES ({user_id}, {group_id}, {item_type}, 0)"
+            cursor.execute(sql)
+            conn.commit()
+            amount = 0
+        else:
+            amount = int(result[0])
+        
+        return amount
+    finally:
+        if conn:
+            conn.close()
 
 def update_user_item(group_id: int, user_id: int, item_type: int, amount: int) -> None:
     """更新用户物品数量"""
     init_market_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 确保数量不为负
-    amount = max(0, amount)
-    
-    sql = f"SELECT id FROM user_items WHERE uid={user_id} AND belonging_group={group_id} AND item_type={item_type}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        # 创建新记录
-        sql = f"INSERT INTO user_items (uid, belonging_group, item_type, amount) VALUES ({user_id}, {group_id}, {item_type}, {amount})"
-    else:
-        # 更新记录
-        sql = f"UPDATE user_items SET amount={amount} WHERE uid={user_id} AND belonging_group={group_id} AND item_type={item_type}"
-    
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    conn.close()
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        
+        # 确保数量不为负
+        amount = max(0, amount)
+        
+        sql = f"SELECT id FROM user_items WHERE uid={user_id} AND belonging_group={group_id} AND item_type={item_type}"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新记录
+            sql = f"INSERT INTO user_items (uid, belonging_group, item_type, amount) VALUES ({user_id}, {group_id}, {item_type}, {amount})"
+        else:
+            # 更新记录
+            sql = f"UPDATE user_items SET amount={amount} WHERE uid={user_id} AND belonging_group={group_id} AND item_type={item_type}"
+        
+        cursor.execute(sql)
+        conn.commit()
+    finally:
+        if conn:
+            conn.close()
 
 def get_resource_price(group_id: int, resource_type: int) -> float:
     """获取资源当前价格"""
     init_market_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    today = datetime.date.today().isoformat()
-    
-    # 检查是否有价格记录
-    sql = f"SELECT current_price, last_update, daily_trade_volume FROM resource_prices WHERE belonging_group={group_id} AND resource_type={resource_type}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        # 创建新记录，使用基准价格
-        base_price = RESOURCE_PRICES[resource_type]
-        sql = f"INSERT INTO resource_prices (belonging_group, resource_type, base_price, current_price, last_update, daily_trade_volume) VALUES ({group_id}, {resource_type}, {base_price}, {base_price}, '{today}', 0)"
-        cursor.execute(sql)
-        conn.commit()
-        price = base_price
-    else:
-        price, last_update, trade_volume = result
-        price = float(price)
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
         
-        # 检查是否需要重置每日交易量
-        if last_update != today:
-            # 重置每日交易量
-            sql = f"UPDATE resource_prices SET daily_trade_volume=0, last_update='{today}' WHERE belonging_group={group_id} AND resource_type={resource_type}"
+        today = datetime.date.today().isoformat()
+        
+        # 检查是否有价格记录
+        sql = f"SELECT current_price, last_update, daily_trade_volume FROM resource_prices WHERE belonging_group={group_id} AND resource_type={resource_type}"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新记录，使用基准价格
+            base_price = RESOURCE_PRICES[resource_type]
+            sql = f"INSERT INTO resource_prices (belonging_group, resource_type, base_price, current_price, last_update, daily_trade_volume) VALUES ({group_id}, {resource_type}, {base_price}, {base_price}, '{today}', 0)"
             cursor.execute(sql)
             conn.commit()
-    
-    cursor.close()
-    conn.close()
-    return price
+            price = base_price
+        else:
+            price, last_update, trade_volume = result
+            price = float(price)
+            
+            # 检查是否需要重置每日交易量
+            if last_update != today:
+                # 重置每日交易量
+                sql = f"UPDATE resource_prices SET daily_trade_volume=0, last_update='{today}' WHERE belonging_group={group_id} AND resource_type={resource_type}"
+                cursor.execute(sql)
+                conn.commit()
+        
+        return price
+    finally:
+        if conn:
+            conn.close()
 
 def update_resource_price(group_id: int, resource_type: int, trade_volume: int) -> float:
     """更新资源价格（根据交易量）"""
     init_market_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 获取当前价格和交易量
-    sql = f"SELECT base_price, current_price, daily_trade_volume FROM resource_prices WHERE belonging_group={group_id} AND resource_type={resource_type}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        # 如果没有记录，先获取价格
-        price = get_resource_price(group_id, resource_type)
-        return price
-    
-    base_price, current_price, daily_trade_volume = result
-    base_price = float(base_price)
-    current_price = float(current_price)
-    daily_trade_volume = int(daily_trade_volume)
-    
-    # 更新交易量
-    new_trade_volume = daily_trade_volume + abs(trade_volume)
-    
-    # 计算价格变化（每100单位交易量导致1%基准价格变化）
-    price_change_percent = round((new_trade_volume - daily_trade_volume) / 100 * 0.01, 2)
-    
-    # 如果是购买，价格上涨；如果是出售，价格下跌
-    if trade_volume > 0:  # 购买
-        price_change = round(base_price * price_change_percent, 2)
-    else:  # 出售
-        price_change = round(-base_price * price_change_percent, 2)
-    
-    # 计算新价格
-    new_price = round(current_price + price_change, 2)
-    
-    # 确保价格不超过每日最大波动（基准价格的50%）
-    min_price = base_price * 0.5
-    max_price = base_price * 1.5
-    new_price = round(max(min_price, min(max_price, new_price)), 2)  # 保留两位小数
-    
-    # 更新数据库
-    today = datetime.date.today().isoformat()
-    sql = f"UPDATE resource_prices SET current_price={new_price}, daily_trade_volume={new_trade_volume}, last_update='{today}' WHERE belonging_group={group_id} AND resource_type={resource_type}"
-    cursor.execute(sql)
-    conn.commit()
-    
-    cursor.close()
-    conn.close()
-    return new_price
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        
+        # 获取当前价格和交易量
+        sql = f"SELECT base_price, current_price, daily_trade_volume FROM resource_prices WHERE belonging_group={group_id} AND resource_type={resource_type}"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 如果没有记录，先获取价格
+            price = get_resource_price(group_id, resource_type)
+            return price
+        
+        base_price, current_price, daily_trade_volume = result
+        base_price = float(base_price)
+        current_price = float(current_price)
+        daily_trade_volume = int(daily_trade_volume)
+        
+        # 更新交易量
+        new_trade_volume = daily_trade_volume + abs(trade_volume)
+        
+        # 计算价格变化（每100单位交易量导致1%基准价格变化）
+        price_change_percent = round((new_trade_volume - daily_trade_volume) / 100 * 0.01, 2)
+        
+        # 如果是购买，价格上涨；如果是出售，价格下跌
+        if trade_volume > 0:  # 购买
+            price_change = round(base_price * price_change_percent, 2)
+        else:  # 出售
+            price_change = round(-base_price * price_change_percent, 2)
+        
+        # 计算新价格
+        new_price = round(current_price + price_change, 2)
+        
+        # 确保价格不超过每日最大波动（基准价格的50%）
+        min_price = base_price * 0.5
+        max_price = base_price * 1.5
+        new_price = round(max(min_price, min(max_price, new_price)), 2)  # 保留两位小数
+        
+        # 更新数据库
+        today = datetime.date.today().isoformat()
+        sql = f"UPDATE resource_prices SET current_price={new_price}, daily_trade_volume={new_trade_volume}, last_update='{today}' WHERE belonging_group={group_id} AND resource_type={resource_type}"
+        cursor.execute(sql)
+        conn.commit()
+        
+        return new_price
+    finally:
+        if conn:
+            conn.close()
 
 def get_production_card_uses(group_id: int, user_id: int) -> int:
     """获取用户生产加倍卡剩余使用次数"""
@@ -306,56 +322,62 @@ def get_production_card_uses(group_id: int, user_id: int) -> int:
         return production_card_uses[(group_id, user_id)]
     
     init_market_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    sql = f"SELECT remaining_uses FROM production_card_uses WHERE uid={user_id} AND belonging_group={group_id}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        # 创建新记录
-        sql = f"INSERT INTO production_card_uses (uid, belonging_group, remaining_uses) VALUES ({user_id}, {group_id}, 0)"
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        
+        sql = f"SELECT remaining_uses FROM production_card_uses WHERE uid={user_id} AND belonging_group={group_id}"
         cursor.execute(sql)
-        conn.commit()
-        remaining_uses = 0
-    else:
-        remaining_uses = int(result[0])
-    
-    # 更新内存记录
-    production_card_uses[(group_id, user_id)] = remaining_uses
-    
-    cursor.close()
-    conn.close()
-    return remaining_uses
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新记录
+            sql = f"INSERT INTO production_card_uses (uid, belonging_group, remaining_uses) VALUES ({user_id}, {group_id}, 0)"
+            cursor.execute(sql)
+            conn.commit()
+            remaining_uses = 0
+        else:
+            remaining_uses = int(result[0])
+        
+        # 更新内存记录
+        production_card_uses[(group_id, user_id)] = remaining_uses
+        
+        return remaining_uses
+    finally:
+        if conn:
+            conn.close()
 
 def update_production_card_uses(group_id: int, user_id: int, remaining_uses: int) -> None:
     """更新用户生产加倍卡剩余使用次数"""
     init_market_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 确保次数不为负
-    remaining_uses = max(0, remaining_uses)
-    
-    sql = f"SELECT id FROM production_card_uses WHERE uid={user_id} AND belonging_group={group_id}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        # 创建新记录
-        sql = f"INSERT INTO production_card_uses (uid, belonging_group, remaining_uses) VALUES ({user_id}, {group_id}, {remaining_uses})"
-    else:
-        # 更新记录
-        sql = f"UPDATE production_card_uses SET remaining_uses={remaining_uses} WHERE uid={user_id} AND belonging_group={group_id}"
-    
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    conn.close()
-    
-    # 更新内存记录
-    production_card_uses[(group_id, user_id)] = remaining_uses
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        
+        # 确保次数不为负
+        remaining_uses = max(0, remaining_uses)
+        
+        sql = f"SELECT id FROM production_card_uses WHERE uid={user_id} AND belonging_group={group_id}"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新记录
+            sql = f"INSERT INTO production_card_uses (uid, belonging_group, remaining_uses) VALUES ({user_id}, {group_id}, {remaining_uses})"
+        else:
+            # 更新记录
+            sql = f"UPDATE production_card_uses SET remaining_uses={remaining_uses} WHERE uid={user_id} AND belonging_group={group_id}"
+        
+        cursor.execute(sql)
+        conn.commit()
+        
+        # 更新内存记录
+        production_card_uses[(group_id, user_id)] = remaining_uses
+    finally:
+        if conn:
+            conn.close()
 
 def get_stamina_card_purchases(group_id: int, user_id: int) -> int:
     """获取用户今日体力恢复卡购买次数"""
@@ -366,78 +388,86 @@ def get_stamina_card_purchases(group_id: int, user_id: int) -> int:
         return stamina_card_purchases[(group_id, user_id, today)]
     
     init_market_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    sql = f"SELECT count FROM stamina_card_purchases WHERE uid={user_id} AND belonging_group={group_id} AND purchase_date='{today}'"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        # 创建新记录
-        sql = f"INSERT INTO stamina_card_purchases (uid, belonging_group, purchase_date, count) VALUES ({user_id}, {group_id}, '{today}', 0)"
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        
+        sql = f"SELECT count FROM stamina_card_purchases WHERE uid={user_id} AND belonging_group={group_id} AND purchase_date='{today}'"
         cursor.execute(sql)
-        conn.commit()
-        count = 0
-    else:
-        count = int(result[0])
-    
-    # 更新内存记录
-    stamina_card_purchases[(group_id, user_id, today)] = count
-    
-    cursor.close()
-    conn.close()
-    return count
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新记录
+            sql = f"INSERT INTO stamina_card_purchases (uid, belonging_group, purchase_date, count) VALUES ({user_id}, {group_id}, '{today}', 0)"
+            cursor.execute(sql)
+            conn.commit()
+            count = 0
+        else:
+            count = int(result[0])
+        
+        # 更新内存记录
+        stamina_card_purchases[(group_id, user_id, today)] = count
+        
+        return count
+    finally:
+        if conn:
+            conn.close()
 
 def update_stamina_card_purchases(group_id: int, user_id: int, count: int) -> None:
     """更新用户今日体力恢复卡购买次数"""
     today = datetime.date.today().isoformat()
     
     init_market_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 确保次数不为负
-    count = max(0, count)
-    
-    sql = f"SELECT id FROM stamina_card_purchases WHERE uid={user_id} AND belonging_group={group_id} AND purchase_date='{today}'"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        # 创建新记录
-        sql = f"INSERT INTO stamina_card_purchases (uid, belonging_group, purchase_date, count) VALUES ({user_id}, {group_id}, '{today}', {count})"
-    else:
-        # 更新记录
-        sql = f"UPDATE stamina_card_purchases SET count={count} WHERE uid={user_id} AND belonging_group={group_id} AND purchase_date='{today}'"
-    
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    conn.close()
-    
-    # 更新内存记录
-    stamina_card_purchases[(group_id, user_id, today)] = count
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        
+        # 确保次数不为负
+        count = max(0, count)
+        
+        sql = f"SELECT id FROM stamina_card_purchases WHERE uid={user_id} AND belonging_group={group_id} AND purchase_date='{today}'"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新记录
+            sql = f"INSERT INTO stamina_card_purchases (uid, belonging_group, purchase_date, count) VALUES ({user_id}, {group_id}, '{today}', {count})"
+        else:
+            # 更新记录
+            sql = f"UPDATE stamina_card_purchases SET count={count} WHERE uid={user_id} AND belonging_group={group_id} AND purchase_date='{today}'"
+        
+        cursor.execute(sql)
+        conn.commit()
+        
+        # 更新内存记录
+        stamina_card_purchases[(group_id, user_id, today)] = count
+    finally:
+        if conn:
+            conn.close()
 
 def get_next_listing_id(group_id: int) -> int:
     """获取下一个市场挂单ID"""
     if group_id not in market_listing_counter:
         init_market_db()
-        conn = sqlite3.connect("identifier.sqlite")
-        cursor = conn.cursor()
-        
-        # 获取当前最大ID
-        sql = f"SELECT MAX(listing_id) FROM market_listings WHERE belonging_group={group_id}"
-        cursor.execute(sql)
-        result = cursor.fetchone()
-        
-        if result[0] is None:
-            market_listing_counter[group_id] = 1
-        else:
-            market_listing_counter[group_id] = int(result[0]) + 1
-        
-        cursor.close()
-        conn.close()
+        conn = None
+        try:
+            conn = db_pool.get_connection()
+            cursor = conn.cursor()
+            
+            # 获取当前最大ID
+            sql = f"SELECT MAX(listing_id) FROM market_listings WHERE belonging_group={group_id}"
+            cursor.execute(sql)
+            result = cursor.fetchone()
+            
+            if result[0] is None:
+                market_listing_counter[group_id] = 1
+            else:
+                market_listing_counter[group_id] = int(result[0]) + 1
+        finally:
+            if conn:
+                conn.close()
     else:
         market_listing_counter[group_id] += 1
     
@@ -615,23 +645,25 @@ def sell_to_system(group_id: int, user_id: int, resource_type: int, amount: int)
     is_top_three = False
     
     # 直接查询数据库获取富豪榜前三名
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 联合查询金币和银行存款，获取前三名用户
-    sql = f"""
-    SELECT s.uid, s.points + COALESCE(b.balance, 0) as total_wealth 
-    FROM sign_in s 
-    LEFT JOIN bank_accounts b ON s.uid = b.uid AND s.belonging_group = b.belonging_group 
-    WHERE s.belonging_group = {group_id} 
-    ORDER BY total_wealth DESC 
-    LIMIT 3
-    """
-    cursor.execute(sql)
-    top_three_users = cursor.fetchall()
-    
-    cursor.close()
-    conn.close()
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        
+        # 联合查询金币和银行存款，获取前三名用户
+        sql = f"""
+        SELECT s.uid, s.points + COALESCE(b.balance, 0) as total_wealth 
+        FROM sign_in s 
+        LEFT JOIN bank_accounts b ON s.uid = b.uid AND s.belonging_group = b.belonging_group 
+        WHERE s.belonging_group = {group_id} 
+        ORDER BY total_wealth DESC 
+        LIMIT 3
+        """
+        cursor.execute(sql)
+        top_three_users = cursor.fetchall()
+    finally:
+        if conn:
+            conn.close()
     
     # 检查用户是否在前三名
     for top_user_id, _ in top_three_users:
@@ -698,14 +730,17 @@ def create_market_listing(group_id: int, user_id: int, item_type: int, resource_
         listing_id = get_next_listing_id(group_id)
         
         init_market_db()
-        conn = sqlite3.connect("identifier.sqlite")
-        cursor = conn.cursor()
-        
-        sql = f"INSERT INTO market_listings (listing_id, belonging_group, seller_id, item_type, resource_type, tool_type, tool_category, special_resource_type, price_per_unit, quantity) VALUES ({listing_id}, {group_id}, {user_id}, {item_type}, {resource_type}, NULL, NULL, NULL, {price_per_unit}, {quantity})"
-        cursor.execute(sql)
-        conn.commit()
-        cursor.close()
-        conn.close()
+        conn = None
+        try:
+            conn = db_pool.get_connection()
+            cursor = conn.cursor()
+            
+            sql = f"INSERT INTO market_listings (listing_id, belonging_group, seller_id, item_type, resource_type, tool_type, tool_category, special_resource_type, price_per_unit, quantity) VALUES ({listing_id}, {group_id}, {user_id}, {item_type}, {resource_type}, NULL, NULL, NULL, {price_per_unit}, {quantity})"
+            cursor.execute(sql)
+            conn.commit()
+        finally:
+            if conn:
+                conn.close()
         
         resource_names = {RESOURCE_FOOD: "食物", RESOURCE_WOOD: "木材", RESOURCE_ORE: "矿石"}
         return f"成功创建市场挂单！\n挂单ID：{listing_id}\n资源类型：{resource_names[resource_type]}\n单价：{price_per_unit}金币\n数量：{quantity}\n总价值：{price_per_unit * quantity}金币"
@@ -738,14 +773,17 @@ def create_market_listing(group_id: int, user_id: int, item_type: int, resource_
         listing_id = get_next_listing_id(group_id)
         
         init_market_db()
-        conn = sqlite3.connect("identifier.sqlite")
-        cursor = conn.cursor()
-        
-        sql = f"INSERT INTO market_listings (listing_id, belonging_group, seller_id, item_type, resource_type, tool_type, tool_category, special_resource_type, price_per_unit, quantity) VALUES ({listing_id}, {group_id}, {user_id}, {item_type}, NULL, {tool_type}, {tool_category}, NULL, {price_per_unit}, 1)"
-        cursor.execute(sql)
-        conn.commit()
-        cursor.close()
-        conn.close()
+        conn = None
+        try:
+            conn = db_pool.get_connection()
+            cursor = conn.cursor()
+            
+            sql = f"INSERT INTO market_listings (listing_id, belonging_group, seller_id, item_type, resource_type, tool_type, tool_category, special_resource_type, price_per_unit, quantity) VALUES ({listing_id}, {group_id}, {user_id}, {item_type}, NULL, {tool_type}, {tool_category}, NULL, {price_per_unit}, 1)"
+            cursor.execute(sql)
+            conn.commit()
+        finally:
+            if conn:
+                conn.close()
         
         tool_type_names = {TOOL_IRON: "铁质", TOOL_FINE_GOLD: "精金", TOOL_ALLOY: "强化合金", TOOL_ALLOY_PERM: "强化合金【不毁】"}
         tool_category_names = {TOOL_TYPE_PICKAXE: "镐", TOOL_TYPE_HOE: "锄", TOOL_TYPE_AXE: "斧"}
@@ -771,14 +809,17 @@ def create_market_listing(group_id: int, user_id: int, item_type: int, resource_
         listing_id = get_next_listing_id(group_id)
         
         init_market_db()
-        conn = sqlite3.connect("identifier.sqlite")
-        cursor = conn.cursor()
-        
-        sql = f"INSERT INTO market_listings (listing_id, belonging_group, seller_id, item_type, resource_type, tool_type, tool_category, special_resource_type, price_per_unit, quantity) VALUES ({listing_id}, {group_id}, {user_id}, {item_type}, NULL, NULL, NULL, {special_resource_type}, {price_per_unit}, {quantity})"
-        cursor.execute(sql)
-        conn.commit()
-        cursor.close()
-        conn.close()
+        conn = None
+        try:
+            conn = db_pool.get_connection()
+            cursor = conn.cursor()
+            
+            sql = f"INSERT INTO market_listings (listing_id, belonging_group, seller_id, item_type, resource_type, tool_type, tool_category, special_resource_type, price_per_unit, quantity) VALUES ({listing_id}, {group_id}, {user_id}, {item_type}, NULL, NULL, NULL, {special_resource_type}, {price_per_unit}, {quantity})"
+            cursor.execute(sql)
+            conn.commit()
+        finally:
+            if conn:
+                conn.close()
         
         special_resource_names = {SPECIAL_BLUE_GEM: "海蓝宝石", SPECIAL_SUPER_PLANT: "超级植株", SPECIAL_DEMON_BRANCH: "恶魔树枝干"}
         return f"成功创建市场挂单！\n挂单ID：{listing_id}\n特殊材料类型：{special_resource_names[special_resource_type]}\n单价：{price_per_unit}金币\n数量：{quantity}\n总价值：{price_per_unit * quantity}金币"
@@ -793,49 +834,44 @@ def buy_from_market(group_id: int, user_id: int, listing_id: int, quantity: int)
     
     # 获取挂单信息
     init_market_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    sql = f"SELECT seller_id, item_type, resource_type, tool_type, tool_category, special_resource_type, price_per_unit, quantity FROM market_listings WHERE belonging_group={group_id} AND listing_id={listing_id}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        cursor.close()
-        conn.close()
-        return f"挂单不存在！ID：{listing_id}"
-    
-    seller_id, item_type, resource_type, tool_type, tool_category, special_resource_type, price_per_unit, available_quantity = result
-    
-    # 检查是否是自己的挂单
-    if seller_id == user_id:
-        cursor.close()
-        conn.close()
-        return "不能购买自己的挂单！"
-    
-    # 对于工具类型，只能购买1个
-    if item_type == 1 and quantity > 1:
-        cursor.close()
-        conn.close()
-        return "工具类型每次只能购买1个！"
-    
-    # 检查数量是否足够
-    if available_quantity < quantity:
-        cursor.close()
-        conn.close()
-        return f"挂单数量不足！只有{available_quantity}个，无法购买{quantity}个。"
-    
-    # 计算总价值
-    total_price = price_per_unit * quantity
-    
-    # 获取用户金币
-    user_coins = get_point(group_id, user_id)
-    
-    # 检查金币是否足够
-    if user_coins < total_price:
-        cursor.close()
-        conn.close()
-        return f"金币不足！需要{total_price}金币，当前持有{user_coins}金币。"
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        
+        sql = f"SELECT seller_id, item_type, resource_type, tool_type, tool_category, special_resource_type, price_per_unit, quantity FROM market_listings WHERE belonging_group={group_id} AND listing_id={listing_id}"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        if result is None:
+            return f"挂单不存在！ID：{listing_id}"
+        
+        seller_id, item_type, resource_type, tool_type, tool_category, special_resource_type, price_per_unit, available_quantity = result
+        
+        # 检查是否是自己的挂单
+        if seller_id == user_id:
+            return "不能购买自己的挂单！"
+        
+        # 对于工具类型，只能购买1个
+        if item_type == 1 and quantity > 1:
+            return "工具类型每次只能购买1个！"
+        
+        # 检查数量是否足够
+        if available_quantity < quantity:
+            return f"挂单数量不足！只有{available_quantity}个，无法购买{quantity}个。"
+        
+        # 计算总价值
+        total_price = price_per_unit * quantity
+        
+        # 获取用户金币
+        user_coins = get_point(group_id, user_id)
+        
+        # 检查金币是否足够
+        if user_coins < total_price:
+            return f"金币不足！需要{total_price}金币，当前持有{user_coins}金币。"
+    finally:
+        if conn:
+            conn.close()
     
     # 更新用户金币（扣除购买金额）
     update_point(group_id, user_id, user_coins - total_price)
@@ -928,10 +964,15 @@ def buy_from_market(group_id: int, user_id: int, listing_id: int, quantity: int)
     else:
         sql = f"DELETE FROM market_listings WHERE belonging_group={group_id} AND listing_id={listing_id}"
     
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    conn.close()
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(sql)
+        conn.commit()
+    finally:
+        if conn:
+            conn.close()
     
     return f"成功从市场购买！\n{item_description}\n单价：{price_per_unit}金币\n数量：{quantity}\n总花费：{total_price}金币\n当前金币：{user_coins - total_price}"
 
@@ -939,25 +980,26 @@ def cancel_market_listing(group_id: int, user_id: int, listing_id: int) -> str:
     """取消市场挂单"""
     # 获取挂单信息
     init_market_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    sql = f"SELECT seller_id, item_type, resource_type, tool_type, tool_category, special_resource_type, quantity FROM market_listings WHERE belonging_group={group_id} AND listing_id={listing_id}"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        cursor.close()
-        conn.close()
-        return f"挂单不存在！ID：{listing_id}"
-    
-    seller_id, item_type, resource_type, tool_type, tool_category, special_resource_type, quantity = result
-    
-    # 检查是否是自己的挂单
-    if seller_id != user_id:
-        cursor.close()
-        conn.close()
-        return "只能取消自己的挂单！"
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        
+        sql = f"SELECT seller_id, item_type, resource_type, tool_type, tool_category, special_resource_type, quantity FROM market_listings WHERE belonging_group={group_id} AND listing_id={listing_id}"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        if result is None:
+            return f"挂单不存在！ID：{listing_id}"
+        
+        seller_id, item_type, resource_type, tool_type, tool_category, special_resource_type, quantity = result
+        
+        # 检查是否是自己的挂单
+        if seller_id != user_id:
+            return "只能取消自己的挂单！"
+    finally:
+        if conn:
+            conn.close()
     
     # 返还物品
     item_description = ""
@@ -990,25 +1032,32 @@ def cancel_market_listing(group_id: int, user_id: int, listing_id: int) -> str:
     
     # 删除挂单
     sql = f"DELETE FROM market_listings WHERE belonging_group={group_id} AND listing_id={listing_id}"
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    conn.close()
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(sql)
+        conn.commit()
+    finally:
+        if conn:
+            conn.close()
     
     return f"成功取消市场挂单！\n挂单ID：{listing_id}\n{item_description}\n返还数量：{quantity}"
 
 def get_market_listings(group_id: int) -> str:
     """获取市场挂单列表"""
     init_market_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    sql = f"SELECT listing_id, seller_id, item_type, resource_type, tool_type, tool_category, special_resource_type, price_per_unit, quantity FROM market_listings WHERE belonging_group={group_id} ORDER BY listing_time DESC"
-    cursor.execute(sql)
-    results = cursor.fetchall()
-    
-    cursor.close()
-    conn.close()
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        
+        sql = f"SELECT listing_id, seller_id, item_type, resource_type, tool_type, tool_category, special_resource_type, price_per_unit, quantity FROM market_listings WHERE belonging_group={group_id} ORDER BY listing_time DESC"
+        cursor.execute(sql)
+        results = cursor.fetchall()
+    finally:
+        if conn:
+            conn.close()
     
     if not results:
         return "当前市场没有挂单！"

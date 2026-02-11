@@ -1,20 +1,15 @@
 import sqlite3
 import datetime
 import random
-import threading
+import time
 
 from nonebot_plugin_apscheduler import scheduler
 
-# 导入数据库连接池
-from .game import db_pool
+# 导入公共数据库连接池
+from .db import db_pool
 
-# 签到缓存
-user_sign_cache = {}
-user_card_cache = {}
-cache_lock = threading.Lock()
-
-# 缓存过期时间（秒）
-CACHE_EXPIRY = 300
+# 导入公共缓存模块
+from .cache import cache_manager
 
 # 用户ID映射表 - 将QQ官方机器人的用户ID映射到原QQ号
 user_id_mapping = {
@@ -136,10 +131,8 @@ def sign_today(uid, group_id) -> str:
             conn.commit()
             
             # 清除缓存
-            cache_key = (group_id, uid, "sign")
-            with cache_lock:
-                if cache_key in user_sign_cache:
-                    del user_sign_cache[cache_key]
+            cache_key = f"sign_{group_id}_{uid}"
+            cache_manager.clear_cache(cache_key)
             
             message += f"\n你现在的金币是{coins_now:.2f}"
             return message
@@ -162,10 +155,8 @@ def sign_today(uid, group_id) -> str:
             conn.commit()
             
             # 清除缓存
-            cache_key = (group_id, uid, "sign")
-            with cache_lock:
-                if cache_key in user_sign_cache:
-                    del user_sign_cache[cache_key]
+            cache_key = f"sign_{group_id}_{uid}"
+            cache_manager.clear_cache(cache_key)
             
             message += f"\n你现在的金币是{coins:.2f}"
             return message
@@ -176,12 +167,10 @@ def sign_today(uid, group_id) -> str:
 def get_point(group: int, uid: int) -> float:
     init()
     # 先检查缓存
-    cache_key = (group, uid, "sign")
-    with cache_lock:
-        if cache_key in user_sign_cache:
-            value, timestamp = user_sign_cache[cache_key]
-            if time.time() - timestamp < CACHE_EXPIRY:
-                return value
+    cache_key = f"sign_point_{group}_{uid}"
+    cached_value = cache_manager.get_cached_value(cache_key)
+    if cached_value is not None:
+        return cached_value
     
     # 从数据库获取
     conn = db_pool.get_connection()
@@ -196,8 +185,7 @@ def get_point(group: int, uid: int) -> float:
             point = 0.0
         
         # 更新缓存
-        with cache_lock:
-            user_sign_cache[cache_key] = (point, time.time())
+        cache_manager.set_cached_value(cache_key, point)
         
         return point
     finally:
@@ -215,9 +203,8 @@ def update_point(group: int, uid: int, point: float):
         conn.commit()
         
         # 更新缓存
-        cache_key = (group, uid, "sign")
-        with cache_lock:
-            user_sign_cache[cache_key] = (point, time.time())
+        cache_key = f"sign_point_{group}_{uid}"
+        cache_manager.set_cached_value(cache_key, point)
     finally:
         db_pool.return_connection(conn)
 
@@ -272,12 +259,10 @@ def init():
 def check_supreme_card(uid: int, group_id: int) -> bool:
     """检查用户是否拥有至尊签到卡"""
     # 先检查缓存
-    cache_key = (uid, group_id, "supreme_card")
-    with cache_lock:
-        if cache_key in user_card_cache:
-            value, timestamp = user_card_cache[cache_key]
-            if time.time() - timestamp < CACHE_EXPIRY:
-                return value
+    cache_key = f"supreme_card_{group_id}_{uid}"
+    cached_value = cache_manager.get_cached_value(cache_key)
+    if cached_value is not None:
+        return cached_value
     
     # 从数据库获取
     conn = db_pool.get_connection()
@@ -289,8 +274,7 @@ def check_supreme_card(uid: int, group_id: int) -> bool:
         has_card = result is not None
         
         # 更新缓存
-        with cache_lock:
-            user_card_cache[cache_key] = (has_card, time.time())
+        cache_manager.set_cached_value(cache_key, has_card)
         
         return has_card
     finally:
@@ -318,10 +302,8 @@ def add_supreme_card(uid: int, group_id: int):
         conn.commit()
         
         # 清除缓存，确保下次查询时重新获取
-        cache_key = (uid, group_id, "supreme_card")
-        with cache_lock:
-            if cache_key in user_card_cache:
-                del user_card_cache[cache_key]
+        cache_key = f"supreme_card_{group_id}_{uid}"
+        cache_manager.clear_cache(cache_key)
     finally:
         db_pool.return_connection(conn)
 
@@ -380,18 +362,9 @@ def mark_xiaodaomeidan_privileged_used(uid, group_id: int):
 
 
 def clear_cache():
-    """清理过期缓存"""
-    current_time = time.time()
-    with cache_lock:
-        # 清理用户签到缓存
-        expired_keys = [key for key, (_, timestamp) in user_sign_cache.items() if current_time - timestamp > CACHE_EXPIRY]
-        for key in expired_keys:
-            del user_sign_cache[key]
-        
-        # 清理至尊签到卡缓存
-        expired_keys = [key for key, (_, timestamp) in user_card_cache.items() if current_time - timestamp > CACHE_EXPIRY]
-        for key in expired_keys:
-            del user_card_cache[key]
+    """清理签到相关缓存"""
+    cache_manager.clear_cache("sign_point_")
+    cache_manager.clear_cache("supreme_card_")
 
 @scheduler.scheduled_job('cron', minute='*/10', id='clear_cache')
 async def schedule_cache_clear():
@@ -402,6 +375,4 @@ async def schedule_cache_clear():
 async def daily_reset():
     # 每日重置时，清除一些临时数据
     # 同时清理所有缓存
-    with cache_lock:
-        user_sign_cache.clear()
-        user_card_cache.clear()
+    clear_cache()

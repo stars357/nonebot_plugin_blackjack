@@ -1,6 +1,5 @@
 import sqlite3
 import datetime
-import threading
 import time
 from typing import Dict, List, Tuple, Optional, Union
 from nonebot_plugin_apscheduler import scheduler
@@ -9,19 +8,15 @@ from .common import (
     TOOL_TYPE_PICKAXE, TOOL_TYPE_HOE, TOOL_TYPE_AXE
 )
 from .profession import get_tool_durability, update_tool_durability
-from .game import db_pool
+
+# 导入公共数据库连接池
+from .db import db_pool
+
+# 导入公共缓存模块
+from .cache import cache_manager
 
 # 用户装备状态字典 {(group_id, user_id): {tool_category: tool_type}}
 equipped_tools: Dict[Tuple[int, int], Dict[int, int]] = {}
-
-# 装备缓存字典 {(group_id, user_id, tool_category): (tool_type, timestamp)}
-equipment_cache: Dict[Tuple[int, int, int], Tuple[int, float]] = {}
-
-# 缓存锁
-cache_lock = threading.Lock()
-
-# 缓存过期时间（秒）
-CACHE_EXPIRY = 300
 
 def init_equipment_db():
     """初始化装备系统数据库"""
@@ -63,16 +58,15 @@ def get_equipped_tool(group_id: int, user_id: int, tool_category: int) -> int:
         return equipped_tools[(group_id, user_id)][tool_category]
     
     # 检查缓存
-    cache_key = (group_id, user_id, tool_category)
-    with cache_lock:
-        if cache_key in equipment_cache:
-            tool_type, timestamp = equipment_cache[cache_key]
-            if time.time() - timestamp < CACHE_EXPIRY:
-                # 更新内存记录
-                if (group_id, user_id) not in equipped_tools:
-                    equipped_tools[(group_id, user_id)] = {}
-                equipped_tools[(group_id, user_id)][tool_category] = tool_type
-                return tool_type
+    cache_key = f"equipment_{group_id}_{user_id}_{tool_category}"
+    cached_value = cache_manager.get_cached_value(cache_key)
+    if cached_value is not None:
+        tool_type = cached_value
+        # 更新内存记录
+        if (group_id, user_id) not in equipped_tools:
+            equipped_tools[(group_id, user_id)] = {}
+        equipped_tools[(group_id, user_id)][tool_category] = tool_type
+        return tool_type
     
     # 从数据库查询
     init_equipment_db()
@@ -96,8 +90,7 @@ def get_equipped_tool(group_id: int, user_id: int, tool_category: int) -> int:
             equipped_tools[(group_id, user_id)][tool_category] = tool_type
         
         # 更新缓存
-        with cache_lock:
-            equipment_cache[cache_key] = (tool_type, time.time())
+        cache_manager.set_cached_value(cache_key, tool_type)
         
         return tool_type
     finally:
@@ -165,9 +158,8 @@ def equip_tool(group_id: int, user_id: int, tool_type: int, tool_category: int) 
         equipped_tools[(group_id, user_id)][tool_category] = tool_type
         
         # 更新缓存
-        cache_key = (group_id, user_id, tool_category)
-        with cache_lock:
-            equipment_cache[cache_key] = (tool_type, time.time())
+        cache_key = f"equipment_{group_id}_{user_id}_{tool_category}"
+        cache_manager.set_cached_value(cache_key, tool_type)
         
         # 构建回复消息
         tool_type_names = ["铁质", "精金", "强化合金", "强化合金【不毁】"]
@@ -224,10 +216,8 @@ def unequip_tool(group_id: int, user_id: int, tool_category: int) -> str:
             del equipped_tools[(group_id, user_id)][tool_category]
         
         # 更新缓存
-        cache_key = (group_id, user_id, tool_category)
-        with cache_lock:
-            if cache_key in equipment_cache:
-                del equipment_cache[cache_key]
+        cache_key = f"equipment_{group_id}_{user_id}_{tool_category}"
+        cache_manager.clear_cache(cache_key)
         
         # 构建回复消息
         tool_type_names = ["铁质", "精金", "强化合金", "强化合金【不毁】"]
@@ -302,12 +292,8 @@ def get_equipment_info(group_id: int, user_id: int) -> str:
 
 # 缓存清理函数
 def clear_equipment_cache():
-    """清理过期缓存"""
-    current_time = time.time()
-    with cache_lock:
-        expired_keys = [key for key, (_, timestamp) in equipment_cache.items() if current_time - timestamp > CACHE_EXPIRY]
-        for key in expired_keys:
-            del equipment_cache[key]
+    """清理装备相关缓存"""
+    cache_manager.clear_cache("equipment_")
 
 # 定期清理缓存
 @scheduler.scheduled_job('cron', minute='*/10', id='clear_equipment_cache')

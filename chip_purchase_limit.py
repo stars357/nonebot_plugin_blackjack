@@ -1,6 +1,7 @@
 import sqlite3
 import datetime
 from typing import Tuple, List, Optional
+from .db import db_pool
 
 # 筹码购买记录表结构
 # - id: 主键
@@ -12,24 +13,27 @@ from typing import Tuple, List, Optional
 
 def init_chip_purchase_db():
     """初始化筹码购买记录数据库"""
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 创建筹码购买记录表
-    sql = """
-    CREATE TABLE IF NOT EXISTS chip_purchase_records (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid INTEGER NOT NULL,
-        belonging_group INTEGER NOT NULL,
-        amount REAL NOT NULL,
-        operation_type TEXT NOT NULL,
-        operation_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    """
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    conn.close()
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        
+        # 创建筹码购买记录表
+        sql = """
+        CREATE TABLE IF NOT EXISTS chip_purchase_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid INTEGER NOT NULL,
+            belonging_group INTEGER NOT NULL,
+            amount REAL NOT NULL,
+            operation_type TEXT NOT NULL,
+            operation_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+        cursor.execute(sql)
+        conn.commit()
+    finally:
+        if conn:
+            conn.close()
 
 def add_chip_purchase_record(group_id: int, user_id: int, amount: float):
     """添加筹码购买记录
@@ -40,15 +44,18 @@ def add_chip_purchase_record(group_id: int, user_id: int, amount: float):
         amount: 购买筹码数量
     """
     init_chip_purchase_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 添加购买记录
-    sql = f"INSERT INTO chip_purchase_records (uid, belonging_group, amount, operation_type) VALUES ({user_id}, {group_id}, {amount}, 'buy')"
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    conn.close()
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        
+        # 添加购买记录
+        sql = f"INSERT INTO chip_purchase_records (uid, belonging_group, amount, operation_type) VALUES ({user_id}, {group_id}, {amount}, 'buy')"
+        cursor.execute(sql)
+        conn.commit()
+    finally:
+        if conn:
+            conn.close()
 
 def add_chip_consumption_record(group_id: int, user_id: int, amount: float):
     """添加筹码消耗记录
@@ -59,15 +66,18 @@ def add_chip_consumption_record(group_id: int, user_id: int, amount: float):
         amount: 消耗筹码数量
     """
     init_chip_purchase_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 添加消耗记录
-    sql = f"INSERT INTO chip_purchase_records (uid, belonging_group, amount, operation_type) VALUES ({user_id}, {group_id}, {amount}, 'consume')"
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    conn.close()
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        
+        # 添加消耗记录
+        sql = f"INSERT INTO chip_purchase_records (uid, belonging_group, amount, operation_type) VALUES ({user_id}, {group_id}, {amount}, 'consume')"
+        cursor.execute(sql)
+        conn.commit()
+    finally:
+        if conn:
+            conn.close()
 
 def get_consecutive_purchases(group_id: int, user_id: int) -> int:
     """获取用户连续购买筹码次数（未消耗）
@@ -80,31 +90,33 @@ def get_consecutive_purchases(group_id: int, user_id: int) -> int:
         int: 连续购买次数
     """
     init_chip_purchase_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 获取最近的操作记录
-    sql = f"""
-    SELECT operation_type FROM chip_purchase_records 
-    WHERE uid={user_id} AND belonging_group={group_id} 
-    ORDER BY operation_time DESC
-    """
-    cursor.execute(sql)
-    results = cursor.fetchall()
-    
-    cursor.close()
-    conn.close()
-    
-    # 计算连续购买次数
-    consecutive_count = 0
-    for result in results:
-        operation_type = result[0]
-        if operation_type == 'buy':
-            consecutive_count += 1
-        else:  # 遇到消耗记录，中断计数
-            break
-    
-    return consecutive_count
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        
+        # 获取最近的操作记录
+        sql = f"""
+        SELECT operation_type FROM chip_purchase_records 
+        WHERE uid={user_id} AND belonging_group={group_id} 
+        ORDER BY operation_time DESC
+        """
+        cursor.execute(sql)
+        results = cursor.fetchall()
+        
+        # 计算连续购买次数
+        consecutive_count = 0
+        for result in results:
+            operation_type = result[0]
+            if operation_type == 'buy':
+                consecutive_count += 1
+            else:  # 遇到消耗记录，中断计数
+                break
+        
+        return consecutive_count
+    finally:
+        if conn:
+            conn.close()
 
 def get_consumed_chips_since_limit(group_id: int, user_id: int) -> float:
     """获取用户自受到限制以来消耗的筹码总量
@@ -117,51 +129,49 @@ def get_consumed_chips_since_limit(group_id: int, user_id: int) -> float:
         float: 消耗的筹码总量
     """
     init_chip_purchase_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 获取最近的购买记录（连续购买超过3次的最早一次）
-    consecutive_purchases = get_consecutive_purchases(group_id, user_id)
-    if consecutive_purchases < 3:
-        # 未受到限制，返回0
-        cursor.close()
-        conn.close()
-        return 0.0
-    
-    # 获取连续购买记录的时间点
-    sql = f"""
-    SELECT operation_time FROM chip_purchase_records 
-    WHERE uid={user_id} AND belonging_group={group_id} AND operation_type='buy'
-    ORDER BY operation_time DESC
-    LIMIT {consecutive_purchases}
-    """
-    cursor.execute(sql)
-    results = cursor.fetchall()
-    
-    if len(results) < consecutive_purchases:
-        cursor.close()
-        conn.close()
-        return 0.0
-    
-    # 获取限制开始的时间点（第三次连续购买的时间）
-    limit_start_time = results[-1][0]
-    
-    # 获取从限制开始时间点之后的消耗记录总和
-    sql = f"""
-    SELECT SUM(amount) FROM chip_purchase_records 
-    WHERE uid={user_id} AND belonging_group={group_id} AND operation_type='consume'
-    AND operation_time > '{limit_start_time}'
-    """
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    cursor.close()
-    conn.close()
-    
-    if result[0] is None:
-        return 0.0
-    else:
-        return float(result[0])
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        
+        # 获取最近的购买记录（连续购买超过3次的最早一次）
+        consecutive_purchases = get_consecutive_purchases(group_id, user_id)
+        if consecutive_purchases < 3:
+            # 未受到限制，返回0
+            return 0.0
+        
+        # 获取连续购买记录的时间点
+        sql = f"""
+        SELECT operation_time FROM chip_purchase_records 
+        WHERE uid={user_id} AND belonging_group={group_id} AND operation_type='buy'
+        ORDER BY operation_time DESC
+        LIMIT {consecutive_purchases}
+        """
+        cursor.execute(sql)
+        results = cursor.fetchall()
+        
+        if len(results) < consecutive_purchases:
+            return 0.0
+        
+        # 获取限制开始的时间点（第三次连续购买的时间）
+        limit_start_time = results[-1][0]
+        
+        # 获取从限制开始时间点之后的消耗记录总和
+        sql = f"""
+        SELECT SUM(amount) FROM chip_purchase_records 
+        WHERE uid={user_id} AND belonging_group={group_id} AND operation_type='consume'
+        AND operation_time > '{limit_start_time}'
+        """
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        if result[0] is None:
+            return 0.0
+        else:
+            return float(result[0])
+    finally:
+        if conn:
+            conn.close()
 
 def reset_consumption_records(group_id: int, user_id: int) -> None:
     """重置用户的筹码消耗记录（抢银行后调用）
@@ -172,15 +182,18 @@ def reset_consumption_records(group_id: int, user_id: int) -> None:
     """
     # 不删除实际记录，而是添加一条特殊的消耗记录，标记重置点
     init_chip_purchase_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 添加重置记录（使用特殊的amount值-1作为标记）
-    sql = f"INSERT INTO chip_purchase_records (uid, belonging_group, amount, operation_type) VALUES ({user_id}, {group_id}, -1, 'reset')"
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    conn.close()
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        
+        # 添加重置记录（使用特殊的amount值-1作为标记）
+        sql = f"INSERT INTO chip_purchase_records (uid, belonging_group, amount, operation_type) VALUES ({user_id}, {group_id}, -1, 'reset')"
+        cursor.execute(sql)
+        conn.commit()
+    finally:
+        if conn:
+            conn.close()
 
 def calculate_price_increase(group_id: int, user_id: int, chips_amount: float) -> float:
     """计算用户购买筹码的价格增加比例

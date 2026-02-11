@@ -2,11 +2,15 @@ import sqlite3
 import datetime
 import random
 import time
-import threading
 from typing import Dict, List, Tuple, Optional, Union
 from nonebot_plugin_apscheduler import scheduler
 from .sign import get_point, update_point
-from .game import db_pool
+
+# 导入公共数据库连接池
+from .db import db_pool
+
+# 导入公共缓存模块
+from .cache import cache_manager
 # 导入共享常量和函数
 from .common import (
     PROF_FARMER, PROF_LUMBERJACK, PROF_MINER, RESOURCE_FOOD, RESOURCE_WOOD, RESOURCE_ORE,
@@ -19,16 +23,7 @@ from .common import (
 # 资源生产CD字典 {(group_id, user_id, resource_type): end_time}
 resource_cd: Dict[Tuple[int, int, int], datetime.datetime] = {}
 
-# 缓存字典
-user_stamina_cache: Dict[Tuple[int, int], Tuple[int, float]] = {}  # {(group_id, user_id): (stamina, timestamp)}
-user_resource_cache: Dict[Tuple[int, int, int], Tuple[int, float]] = {}  # {(group_id, user_id, resource_type): (amount, timestamp)}
-user_tool_cache: Dict[Tuple[int, int, int], Tuple[int, float]] = {}  # {(group_id, user_id, tool_type): (amount, timestamp)}
 
-# 缓存锁
-cache_lock = threading.Lock()
-
-# 缓存过期时间（秒）
-CACHE_EXPIRY = 300
 
 def init_resource_db():
     """初始化资源数据库"""
@@ -97,15 +92,16 @@ def get_user_stamina(group_id: int, user_id: int) -> int:
     init_resource_db()
     
     # 检查缓存
-    cache_key = (group_id, user_id)
+    cache_key = f"user_stamina_{group_id}_{user_id}"
     today = datetime.date.today().isoformat()
     
-    with cache_lock:
-        if cache_key in user_stamina_cache:
-            stamina, timestamp, last_refresh_cache = user_stamina_cache[cache_key]
-            # 如果缓存未过期且最后刷新日期是今天，直接返回
-            if time.time() - timestamp < CACHE_EXPIRY and last_refresh_cache == today:
-                return stamina
+    # 从缓存获取
+    cached_data = cache_manager.get_cached_value(cache_key)
+    if cached_data:
+        stamina, last_refresh_cache = cached_data
+        # 如果最后刷新日期是今天，直接返回
+        if last_refresh_cache == today:
+            return stamina
     
     # 从数据库获取
     conn = db_pool.get_connection()
@@ -135,8 +131,7 @@ def get_user_stamina(group_id: int, user_id: int) -> int:
                 last_refresh = today
         
         # 更新缓存
-        with cache_lock:
-            user_stamina_cache[cache_key] = (stamina, time.time(), last_refresh)
+        cache_manager.set_cached_value(cache_key, (stamina, last_refresh))
         
         return stamina
     finally:
@@ -171,9 +166,8 @@ def update_user_stamina(group_id: int, user_id: int, stamina: int) -> None:
         conn.commit()
         
         # 更新缓存
-        cache_key = (group_id, user_id)
-        with cache_lock:
-            user_stamina_cache[cache_key] = (stamina, time.time(), today)
+        cache_key = f"user_stamina_{group_id}_{user_id}"
+        cache_manager.set_cached_value(cache_key, (stamina, today))
     finally:
         db_pool.return_connection(conn)
 
@@ -182,12 +176,10 @@ def get_user_resource(group_id: int, user_id: int, resource_type: int) -> int:
     init_resource_db()
     
     # 检查缓存
-    cache_key = (group_id, user_id, resource_type)
-    with cache_lock:
-        if cache_key in user_resource_cache:
-            amount, timestamp = user_resource_cache[cache_key]
-            if time.time() - timestamp < CACHE_EXPIRY:
-                return amount
+    cache_key = f"user_resource_{group_id}_{user_id}_{resource_type}"
+    cached_amount = cache_manager.get_cached_value(cache_key)
+    if cached_amount is not None:
+        return cached_amount
     
     # 从数据库获取
     conn = db_pool.get_connection()
@@ -208,8 +200,7 @@ def get_user_resource(group_id: int, user_id: int, resource_type: int) -> int:
             amount = result[0]
         
         # 更新缓存
-        with cache_lock:
-            user_resource_cache[cache_key] = (amount, time.time())
+        cache_manager.set_cached_value(cache_key, amount)
         
         return amount
     finally:
@@ -242,9 +233,8 @@ def update_user_resource(group_id: int, user_id: int, resource_type: int, amount
         conn.commit()
         
         # 更新缓存
-        cache_key = (group_id, user_id, resource_type)
-        with cache_lock:
-            user_resource_cache[cache_key] = (amount, time.time())
+        cache_key = f"user_resource_{group_id}_{user_id}_{resource_type}"
+        cache_manager.set_cached_value(cache_key, amount)
     finally:
         db_pool.return_connection(conn)
 
@@ -253,12 +243,10 @@ def get_user_tool(group_id: int, user_id: int, tool_type: int) -> int:
     init_resource_db()
     
     # 检查缓存
-    cache_key = (group_id, user_id, tool_type)
-    with cache_lock:
-        if cache_key in user_tool_cache:
-            amount, timestamp = user_tool_cache[cache_key]
-            if time.time() - timestamp < CACHE_EXPIRY:
-                return amount
+    cache_key = f"user_tool_{group_id}_{user_id}_{tool_type}"
+    cached_amount = cache_manager.get_cached_value(cache_key)
+    if cached_amount is not None:
+        return cached_amount
     
     # 从数据库获取
     conn = db_pool.get_connection()
@@ -279,8 +267,7 @@ def get_user_tool(group_id: int, user_id: int, tool_type: int) -> int:
             amount = result[0]
         
         # 更新缓存
-        with cache_lock:
-            user_tool_cache[cache_key] = (amount, time.time())
+        cache_manager.set_cached_value(cache_key, amount)
         
         return amount
     finally:
@@ -313,9 +300,8 @@ def update_user_tool(group_id: int, user_id: int, tool_type: int, amount: int) -
         conn.commit()
         
         # 更新缓存
-        cache_key = (group_id, user_id, tool_type)
-        with cache_lock:
-            user_tool_cache[cache_key] = (amount, time.time())
+        cache_key = f"user_tool_{group_id}_{user_id}_{tool_type}"
+        cache_manager.set_cached_value(cache_key, amount)
     finally:
         db_pool.return_connection(conn)
 
@@ -710,39 +696,11 @@ def get_resource_info(group_id: int, user_id: int) -> str:
     
     return message
 
-# 缓存清理函数
-def clear_resource_cache():
-    """清理过期缓存"""
-    current_time = time.time()
-    with cache_lock:
-        # 清理体力缓存
-        expired_keys = [key for key, (_, timestamp, _) in user_stamina_cache.items() if current_time - timestamp > CACHE_EXPIRY]
-        for key in expired_keys:
-            del user_stamina_cache[key]
-        
-        # 清理资源缓存
-        expired_keys = [key for key, (_, timestamp) in user_resource_cache.items() if current_time - timestamp > CACHE_EXPIRY]
-        for key in expired_keys:
-            del user_resource_cache[key]
-        
-        # 清理工具缓存
-        expired_keys = [key for key, (_, timestamp) in user_tool_cache.items() if current_time - timestamp > CACHE_EXPIRY]
-        for key in expired_keys:
-            del user_tool_cache[key]
-        
-        # 清理过期的CD记录
-        expired_keys = []
-        for key, end_time in resource_cd.items():
-            if datetime.datetime.now() > end_time:
-                expired_keys.append(key)
-        for key in expired_keys:
-            del resource_cd[key]
-
-# 定期清理缓存
+# 定期清理缓存 - 现在使用公共缓存模块自动管理过期
 @scheduler.scheduled_job('cron', minute='*/10', id='clear_resource_cache')
 async def schedule_clear_resource_cache():
     """每10分钟清理一次资源缓存"""
-    clear_resource_cache()
+    pass
 
 # 初始化数据库
 init_resource_db()

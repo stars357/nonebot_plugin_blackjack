@@ -1,6 +1,7 @@
 import sqlite3
 import datetime
 from typing import Dict, Tuple
+from .db import db_pool
 
 # 每日购买限制常量
 DAILY_PURCHASE_LIMIT = 50  # 每天最多购买50单位资源
@@ -10,26 +11,29 @@ user_daily_purchases: Dict[Tuple[int, int, int, str], int] = {}
 
 def init_purchase_limit_db():
     """初始化购买限制数据库"""
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 创建用户每日购买记录表
-    sql = """
-    CREATE TABLE IF NOT EXISTS resource_daily_purchases (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid INTEGER NOT NULL,
-        belonging_group INTEGER NOT NULL,
-        resource_type INTEGER NOT NULL,  -- 0: 食物, 1: 木材, 2: 矿石
-        purchase_date DATE NOT NULL,
-        amount INTEGER NOT NULL DEFAULT 0,
-        UNIQUE(uid, belonging_group, resource_type, purchase_date)
-    )
-    """
-    cursor.execute(sql)
-    
-    conn.commit()
-    cursor.close()
-    conn.close()
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        
+        # 创建用户每日购买记录表
+        sql = """
+        CREATE TABLE IF NOT EXISTS resource_daily_purchases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid INTEGER NOT NULL,
+            belonging_group INTEGER NOT NULL,
+            resource_type INTEGER NOT NULL,  -- 0: 食物, 1: 木材, 2: 矿石
+            purchase_date DATE NOT NULL,
+            amount INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(uid, belonging_group, resource_type, purchase_date)
+        )
+        """
+        cursor.execute(sql)
+        
+        conn.commit()
+    finally:
+        if conn:
+            conn.close()
 
 def get_daily_purchases(group_id: int, user_id: int, resource_type: int) -> int:
     """获取用户今日购买资源数量"""
@@ -40,55 +44,61 @@ def get_daily_purchases(group_id: int, user_id: int, resource_type: int) -> int:
         return user_daily_purchases[(group_id, user_id, resource_type, today)]
     
     init_purchase_limit_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    sql = f"SELECT amount FROM resource_daily_purchases WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type} AND purchase_date='{today}'"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        # 创建新记录
-        sql = f"INSERT INTO resource_daily_purchases (uid, belonging_group, resource_type, purchase_date, amount) VALUES ({user_id}, {group_id}, {resource_type}, '{today}', 0)"
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        
+        sql = f"SELECT amount FROM resource_daily_purchases WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type} AND purchase_date='{today}'"
         cursor.execute(sql)
-        conn.commit()
-        amount = 0
-    else:
-        amount = int(result[0])
-    
-    # 更新内存记录
-    user_daily_purchases[(group_id, user_id, resource_type, today)] = amount
-    
-    cursor.close()
-    conn.close()
-    return amount
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新记录
+            sql = f"INSERT INTO resource_daily_purchases (uid, belonging_group, resource_type, purchase_date, amount) VALUES ({user_id}, {group_id}, {resource_type}, '{today}', 0)"
+            cursor.execute(sql)
+            conn.commit()
+            amount = 0
+        else:
+            amount = int(result[0])
+        
+        # 更新内存记录
+        user_daily_purchases[(group_id, user_id, resource_type, today)] = amount
+        
+        return amount
+    finally:
+        if conn:
+            conn.close()
 
 def update_daily_purchases(group_id: int, user_id: int, resource_type: int, amount: int) -> None:
     """更新用户今日购买资源数量"""
     today = datetime.date.today().isoformat()
     
     init_purchase_limit_db()
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    
-    # 确保数量不为负
-    amount = max(0, amount)
-    
-    sql = f"SELECT id FROM resource_daily_purchases WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type} AND purchase_date='{today}'"
-    cursor.execute(sql)
-    result = cursor.fetchone()
-    
-    if result is None:
-        # 创建新记录
-        sql = f"INSERT INTO resource_daily_purchases (uid, belonging_group, resource_type, purchase_date, amount) VALUES ({user_id}, {group_id}, {resource_type}, '{today}', {amount})"
-    else:
-        # 更新记录
-        sql = f"UPDATE resource_daily_purchases SET amount={amount} WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type} AND purchase_date='{today}'"
-    
-    cursor.execute(sql)
-    conn.commit()
-    cursor.close()
-    conn.close()
+    conn = None
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        
+        # 确保数量不为负
+        amount = max(0, amount)
+        
+        sql = f"SELECT id FROM resource_daily_purchases WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type} AND purchase_date='{today}'"
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        
+        if result is None:
+            # 创建新记录
+            sql = f"INSERT INTO resource_daily_purchases (uid, belonging_group, resource_type, purchase_date, amount) VALUES ({user_id}, {group_id}, {resource_type}, '{today}', {amount})"
+        else:
+            # 更新记录
+            sql = f"UPDATE resource_daily_purchases SET amount={amount} WHERE uid={user_id} AND belonging_group={group_id} AND resource_type={resource_type} AND purchase_date='{today}'"
+        
+        cursor.execute(sql)
+        conn.commit()
+    finally:
+        if conn:
+            conn.close()
     
     # 更新内存记录
     user_daily_purchases[(group_id, user_id, resource_type, today)] = amount

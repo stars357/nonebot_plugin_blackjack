@@ -1,49 +1,15 @@
 from .card import Card
 from random import shuffle, randint, random
 import sqlite3
-import threading
 from nonebot.adapters.onebot.v11 import Bot
 from enum import Enum
 from typing import List, Dict, Tuple, Optional, Union
 
-# 数据库连接池
-class DatabasePool:
-    def __init__(self, db_name="identifier.sqlite", max_connections=5):
-        self.db_name = db_name
-        self.max_connections = max_connections
-        self.connections = []
-        self.lock = threading.Lock()
-        
-        # 初始化连接池
-        for _ in range(min(3, max_connections)):
-            self.connections.append(self._create_connection())
-    
-    def _create_connection(self):
-        return sqlite3.connect(self.db_name, check_same_thread=False)
-    
-    def get_connection(self):
-        with self.lock:
-            if self.connections:
-                return self.connections.pop()
-            else:
-                return self._create_connection()
-    
-    def return_connection(self, conn):
-        with self.lock:
-            if len(self.connections) < self.max_connections:
-                self.connections.append(conn)
-            else:
-                conn.close()
+# 导入公共数据库连接池
+from .db import db_pool
 
-# 创建全局数据库连接池
-db_pool = DatabasePool()
-
-# 用户点数缓存
-user_point_cache = {}
-cache_lock = threading.Lock()
-
-# 缓存过期时间（秒）
-CACHE_EXPIRY = 300
+# 导入公共缓存模块
+from .cache import cache_manager
 
 
 # 添加游戏状态枚举类
@@ -410,9 +376,9 @@ async def count_score(game: Deck, player_win: int):
 def get_user_point(group: int, uid: int) -> float:
     # 先检查缓存
     cache_key = (group, uid)
-    with cache_lock:
-        if cache_key in user_point_cache:
-            return user_point_cache[cache_key]
+    hit, point = cache_manager.get_cached_value("user_point_cache", cache_key)
+    if hit:
+        return point
     
     # 从数据库获取
     conn = db_pool.get_connection()
@@ -427,8 +393,7 @@ def get_user_point(group: int, uid: int) -> float:
             point = 0.0
         
         # 更新缓存
-        with cache_lock:
-            user_point_cache[cache_key] = point
+        cache_manager.set_cached_value("user_point_cache", cache_key, point)
         
         return point
     finally:
@@ -446,8 +411,7 @@ def update_point(group: int, uid: int, point: float):
         
         # 更新缓存
         cache_key = (group, uid)
-        with cache_lock:
-            user_point_cache[cache_key] = point
+        cache_manager.set_cached_value("user_point_cache", cache_key, point)
     finally:
         db_pool.return_connection(conn)
 
@@ -455,9 +419,9 @@ def update_point(group: int, uid: int, point: float):
 def get_point(group: int, uid: int) -> float:
     # 先检查缓存
     cache_key = (group, uid)
-    with cache_lock:
-        if cache_key in user_point_cache:
-            return user_point_cache[cache_key]
+    hit, point = cache_manager.get_cached_value("user_point_cache", cache_key)
+    if hit:
+        return point
     
     # 从数据库获取
     conn = db_pool.get_connection()
@@ -472,8 +436,7 @@ def get_point(group: int, uid: int) -> float:
             point = 0.0
         
         # 更新缓存
-        with cache_lock:
-            user_point_cache[cache_key] = point
+        cache_manager.set_cached_value("user_point_cache", cache_key, point)
         
         return point
     finally:
@@ -504,8 +467,7 @@ init()
 
 # 定期清理缓存的函数
 def clear_cache():
-    with cache_lock:
-        user_point_cache.clear()
+    cache_manager.clear_cache("user_point_cache")
 
 # 导入定时器
 import asyncio
@@ -590,32 +552,34 @@ def get_battle_info(group: int, battle_id: int) -> list:
 
 
 async def get_rank(group_id: int, bot: Bot) -> str:
-    conn = sqlite3.connect("identifier.sqlite")
-    cursor = conn.cursor()
-    sql = f'select uid, points from sign_in where belonging_group={group_id} order by points desc limit 3'
-    cursor.execute(sql)
-    data = cursor.execute(sql).fetchall()
-    count = 1
-    msg = "签到金币排名\n"
-    for i in data:
-        uid = i[0]
-        points = i[1]
-        sender = await bot.get_group_member_info(group_id=group_id, user_id=uid)
-        name = sender['card'] or sender.get('nickname', '')
-        msg += f'第{count}名：{name}  {points}金币\n'
-        count += 1
-    sql = f"select uid, today_point from sign_in where belonging_group={group_id} " \
-          f"and sign_in_date = date('now', 'localtime') order by today_point desc limit 5"
-    cursor.execute(sql)
-    data = cursor.execute(sql).fetchall()
-    msg += '今日金币排名\n'
-    n = 1
-    for i in data:
-        uid = i[0]
-        points = i[1]
-        sender = await bot.get_group_member_info(group_id=group_id, user_id=uid)
-        name = sender['card'] or sender.get('nickname', '')
-        msg += f'第{n}名：{name}  {points}金币\n'
-        n += 1
-    msg = msg[:-1]
-    return msg
+    conn = db_pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        sql = f'select uid, points from sign_in where belonging_group={group_id} order by points desc limit 3'
+        cursor.execute(sql)
+        data = cursor.execute(sql).fetchall()
+        count = 1
+        msg = "签到金币排名\n"
+        for i in data:
+            uid = i[0]
+            points = i[1]
+            sender = await bot.get_group_member_info(group_id=group_id, user_id=uid)
+            name = sender['card'] or sender.get('nickname', '')
+            msg += f'第{count}名：{name}  {points}金币\n'
+            count += 1
+        sql = f"select uid, today_point from sign_in where belonging_group={group_id} " \
+              f"and sign_in_date = date('now', 'localtime') order by today_point desc limit 5"
+        cursor.execute(sql)
+        data = cursor.execute(sql).fetchall()
+        msg += "\n今日签到金币排名\n"
+        count = 1
+        for i in data:
+            uid = i[0]
+            points = i[1]
+            sender = await bot.get_group_member_info(group_id=group_id, user_id=uid)
+            name = sender['card'] or sender.get('nickname', '')
+            msg += f'第{count}名：{name}  {points}金币\n'
+            count += 1
+        return msg[:-1]
+    finally:
+        db_pool.return_connection(conn)

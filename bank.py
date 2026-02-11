@@ -2,19 +2,13 @@ import sqlite3
 import datetime
 import random
 import time
-import threading
 from typing import Dict, List, Tuple, Optional, Union
 
-# 导入数据库连接池
-from .game import db_pool
+# 导入公共数据库连接池
+from .db import db_pool
 
-# 用户状态缓存
-user_status_cache = {}
-user_balance_cache = {}
-cache_lock = threading.Lock()
-
-# 缓存过期时间（秒）
-CACHE_EXPIRY = 300
+# 导入公共缓存模块
+from .cache import cache_manager
 
 # 状态常量
 STATUS_FREE = 0      # 自由状态
@@ -86,10 +80,10 @@ init_bank_db()
 def get_bank_balance(group_id: int, user_id: int) -> float:
     """获取用户银行余额"""
     # 先检查缓存
-    cache_key = (group_id, user_id, "balance")
-    with cache_lock:
-        if cache_key in user_balance_cache:
-            return user_balance_cache[cache_key]
+    cache_key = f"bank_balance_{group_id}_{user_id}"
+    cached_value = cache_manager.get_cached_value(cache_key)
+    if cached_value is not None:
+        return cached_value
     
     # 从数据库获取
     conn = db_pool.get_connection()
@@ -111,8 +105,7 @@ def get_bank_balance(group_id: int, user_id: int) -> float:
             balance = float(result[0])
         
         # 更新缓存
-        with cache_lock:
-            user_balance_cache[cache_key] = balance
+        cache_manager.set_cached_value(cache_key, balance)
         
         return balance
     finally:
@@ -141,27 +134,26 @@ def update_bank_balance(group_id: int, user_id: int, balance: float) -> None:
         conn.commit()
         
         # 更新缓存
-        cache_key = (group_id, user_id, "balance")
-        with cache_lock:
-            user_balance_cache[cache_key] = balance
+        cache_key = f"bank_balance_{group_id}_{user_id}"
+        cache_manager.set_cached_value(cache_key, balance)
     finally:
         db_pool.return_connection(conn)
 
 def get_user_status(group_id: int, user_id: int) -> Tuple[int, Optional[datetime.datetime]]:
     """获取用户状态和释放时间"""
     # 先检查缓存
-    cache_key = (group_id, user_id, "status")
-    with cache_lock:
-        if cache_key in user_status_cache:
-            status, release_time = user_status_cache[cache_key]
-            # 检查是否已经过了释放时间
-            if release_time and datetime.datetime.now() > release_time:
-                # 自动释放
-                status = STATUS_FREE
-                release_time = None
-                # 更新缓存
-                user_status_cache[cache_key] = (status, release_time)
-            return status, release_time
+    cache_key = f"user_status_{group_id}_{user_id}"
+    cached_value = cache_manager.get_cached_value(cache_key)
+    if cached_value is not None:
+        status, release_time = cached_value
+        # 检查是否已经过了释放时间
+        if release_time and datetime.datetime.now() > release_time:
+            # 自动释放
+            status = STATUS_FREE
+            release_time = None
+            # 更新缓存
+            cache_manager.set_cached_value(cache_key, (status, release_time))
+        return status, release_time
     
     # 从数据库获取
     conn = db_pool.get_connection()
@@ -198,8 +190,7 @@ def get_user_status(group_id: int, user_id: int) -> Tuple[int, Optional[datetime
                     del wanted_status[(group_id, user_id)]
         
         # 更新缓存
-        with cache_lock:
-            user_status_cache[cache_key] = (status, release_time)
+        cache_manager.set_cached_value(cache_key, (status, release_time))
         
         return status, release_time
     finally:
@@ -230,9 +221,8 @@ def update_user_status(group_id: int, user_id: int, status: int, release_time: O
         conn.commit()
         
         # 更新缓存
-        cache_key = (group_id, user_id, "status")
-        with cache_lock:
-            user_status_cache[cache_key] = (status, release_time)
+        cache_key = f"user_status_{group_id}_{user_id}"
+        cache_manager.set_cached_value(cache_key, (status, release_time))
     finally:
         db_pool.return_connection(conn)
 
@@ -259,9 +249,9 @@ def check_operation_allowed(group_id: int, user_id: int, allow_prison: bool = Fa
 
 # 定期清理缓存的函数
 def clear_cache():
-    with cache_lock:
-        user_status_cache.clear()
-        user_balance_cache.clear()
+    # 清理银行相关缓存
+    cache_manager.clear_cache("bank_balance_")
+    cache_manager.clear_cache("user_status_")
 
 # 导入定时器
 import asyncio
@@ -970,16 +960,18 @@ def jail_break_all(group_id: int, user_id: int) -> str:
     # 50%概率劫狱成功
     if random.random() < 0.5:
         # 劫狱成功，释放所有在押人员
-        conn = sqlite3.connect("identifier.sqlite")
-        cursor = conn.cursor()
-        
-        # 查询所有在押人员
-        sql = f"SELECT uid FROM user_status WHERE belonging_group={group_id} AND status={STATUS_PRISON}"
-        cursor.execute(sql)
-        prisoners = cursor.fetchall()
-        
-        cursor.close()
-        conn.close()
+        conn = None
+        try:
+            conn = db_pool.get_connection()
+            cursor = conn.cursor()
+            
+            # 查询所有在押人员
+            sql = f"SELECT uid FROM user_status WHERE belonging_group={group_id} AND status={STATUS_PRISON}"
+            cursor.execute(sql)
+            prisoners = cursor.fetchall()
+        finally:
+            if conn:
+                conn.close()
         
         if not prisoners:
             return "当前没有人在监狱中，劫狱失败"

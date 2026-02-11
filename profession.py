@@ -2,7 +2,6 @@ import sqlite3
 import datetime
 import random
 import time
-import threading
 from typing import Dict, List, Tuple, Optional, Union
 
 from .resource import get_user_resource, get_user_stamina, produce_resource, update_user_resource, update_user_stamina
@@ -16,48 +15,11 @@ from .common import (
     TOOL_DURABILITY, MAX_STAMINA, RESOURCE_STAMINA_COST, RESOURCE_OUTPUT
 )
 
-# 数据库连接池
-class DatabasePool:
-    def __init__(self, db_name="identifier.sqlite", max_connections=5):
-        self.db_name = db_name
-        self.max_connections = max_connections
-        self.connections = []
-        self.lock = threading.Lock()
-        
-        # 初始化连接池
-        for _ in range(min(3, max_connections)):
-            self.connections.append(self._create_connection())
-    
-    def _create_connection(self):
-        return sqlite3.connect(self.db_name, check_same_thread=False)
-    
-    def get_connection(self):
-        with self.lock:
-            if self.connections:
-                return self.connections.pop()
-            else:
-                return self._create_connection()
-    
-    def return_connection(self, conn):
-        with self.lock:
-            if len(self.connections) < self.max_connections:
-                self.connections.append(conn)
-            else:
-                conn.close()
+# 导入公共数据库连接池
+from .db import db_pool
 
-# 创建全局数据库连接池
-db_pool = DatabasePool()
-
-# 缓存字典
-user_profession_cache = {}
-special_resource_cache = {}
-tool_durability_cache = {}
-
-# 缓存锁
-cache_lock = threading.Lock()
-
-# 缓存过期时间（秒）
-CACHE_EXPIRY = 300
+# 导入公共缓存模块
+from .cache import cache_manager
 
 # 工具制作材料
 TOOL_CRAFTING_MATERIALS = {
@@ -88,10 +50,9 @@ def get_resource_functions():
 
 # 定期清理缓存的函数
 def clear_profession_cache():
-    with cache_lock:
-        user_profession_cache.clear()
-        special_resource_cache.clear()
-        tool_durability_cache.clear()
+    cache_manager.clear_cache("user_profession_cache")
+    cache_manager.clear_cache("special_resource_cache")
+    cache_manager.clear_cache("tool_durability_cache")
 
 # 导入定时器
 import asyncio
@@ -105,86 +66,87 @@ async def schedule_clear_profession_cache():
 def init_profession_db():
     """初始化职业系统数据库"""
     conn = db_pool.get_connection()
-    cursor = conn.cursor()
-    
-    # 创建用户职业表
-    sql = """
-    CREATE TABLE IF NOT EXISTS user_profession (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid INTEGER NOT NULL,
-        belonging_group INTEGER NOT NULL,
-        profession INTEGER NOT NULL DEFAULT -1,  -- -1: 无职业, 0: 牛马, 1: 矿工, 2: 农夫, 3: 伐木工, 4: 铁匠
-        last_change_date DATE,                  -- 上次更换职业的日期
-        working_hours INTEGER DEFAULT 0,        -- 打工累计小时数（仅牛马职业）
-        hourly_wage INTEGER DEFAULT 10,         -- 每小时工资（仅牛马职业）
-        UNIQUE(uid, belonging_group)
-    )
-    """
-    cursor.execute(sql)
-    
-    # 创建用户工具表（扩展现有表，添加耐久度）
-    sql = """
-    CREATE TABLE IF NOT EXISTS user_tool_durability (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid INTEGER NOT NULL,
-        belonging_group INTEGER NOT NULL,
-        tool_type INTEGER NOT NULL,  -- 0: 铁质工具, 1: 精金工具, 2: 强化合金工具, 3: 强化合金工具【不毁】
-        tool_category INTEGER NOT NULL, -- 0: 镐, 1: 锄, 2: 斧
-        durability INTEGER NOT NULL,  -- 剩余耐久度
-        UNIQUE(uid, belonging_group, tool_type, tool_category)
-    )
-    """
-    cursor.execute(sql)
-    
-    # 创建特殊资源表
-    sql = """
-    CREATE TABLE IF NOT EXISTS special_resources (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid INTEGER NOT NULL,
-        belonging_group INTEGER NOT NULL,
-        resource_type INTEGER NOT NULL,  -- 0: 海蓝宝石, 1: 超级植株, 2: 恶魔树枝干
-        amount INTEGER NOT NULL DEFAULT 0,
-        UNIQUE(uid, belonging_group, resource_type)
-    )
-    """
-    cursor.execute(sql)
-    
-    # 创建职业切换CD表
-    sql = """
-    CREATE TABLE IF NOT EXISTS profession_change_cd (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid INTEGER NOT NULL,
-        belonging_group INTEGER NOT NULL,
-        next_change_date DATE NOT NULL,
-        UNIQUE(uid, belonging_group)
-    )
-    """
-    cursor.execute(sql)
-    
-    # 创建打工状态表
-    sql = """
-    CREATE TABLE IF NOT EXISTS working_status (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        uid INTEGER NOT NULL,
-        belonging_group INTEGER NOT NULL,
-        start_time TIMESTAMP NOT NULL,
-        hourly_wage INTEGER NOT NULL,
-        UNIQUE(uid, belonging_group)
-    )
-    """
-    cursor.execute(sql)
-    
-    conn.commit()
-    cursor.close()
-    db_pool.return_connection(conn)
+    try:
+        cursor = conn.cursor()
+        
+        # 创建用户职业表
+        sql = """
+        CREATE TABLE IF NOT EXISTS user_profession (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid INTEGER NOT NULL,
+            belonging_group INTEGER NOT NULL,
+            profession INTEGER NOT NULL DEFAULT -1,  -- -1: 无职业, 0: 牛马, 1: 矿工, 2: 农夫, 3: 伐木工, 4: 铁匠
+            last_change_date DATE,                  -- 上次更换职业的日期
+            working_hours INTEGER DEFAULT 0,        -- 打工累计小时数（仅牛马职业）
+            hourly_wage INTEGER DEFAULT 10,         -- 每小时工资（仅牛马职业）
+            UNIQUE(uid, belonging_group)
+        )
+        """
+        cursor.execute(sql)
+        
+        # 创建用户工具表（扩展现有表，添加耐久度）
+        sql = """
+        CREATE TABLE IF NOT EXISTS user_tool_durability (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid INTEGER NOT NULL,
+            belonging_group INTEGER NOT NULL,
+            tool_type INTEGER NOT NULL,  -- 0: 铁质工具, 1: 精金工具, 2: 强化合金工具, 3: 强化合金工具【不毁】
+            tool_category INTEGER NOT NULL, -- 0: 镐, 1: 锄, 2: 斧
+            durability INTEGER NOT NULL,  -- 剩余耐久度
+            UNIQUE(uid, belonging_group, tool_type, tool_category)
+        )
+        """
+        cursor.execute(sql)
+        
+        # 创建特殊资源表
+        sql = """
+        CREATE TABLE IF NOT EXISTS special_resources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid INTEGER NOT NULL,
+            belonging_group INTEGER NOT NULL,
+            resource_type INTEGER NOT NULL,  -- 0: 海蓝宝石, 1: 超级植株, 2: 恶魔树枝干
+            amount INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(uid, belonging_group, resource_type)
+        )
+        """
+        cursor.execute(sql)
+        
+        # 创建职业切换CD表
+        sql = """
+        CREATE TABLE IF NOT EXISTS profession_change_cd (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid INTEGER NOT NULL,
+            belonging_group INTEGER NOT NULL,
+            next_change_date DATE NOT NULL,
+            UNIQUE(uid, belonging_group)
+        )
+        """
+        cursor.execute(sql)
+        
+        # 创建打工状态表
+        sql = """
+        CREATE TABLE IF NOT EXISTS working_status (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid INTEGER NOT NULL,
+            belonging_group INTEGER NOT NULL,
+            start_time TIMESTAMP NOT NULL,
+            hourly_wage INTEGER NOT NULL,
+            UNIQUE(uid, belonging_group)
+        )
+        """
+        cursor.execute(sql)
+        
+        conn.commit()
+    finally:
+        db_pool.return_connection(conn)
 
 def get_user_profession(group_id: int, user_id: int) -> int:
     """获取用户职业"""
     # 先检查缓存
     cache_key = (group_id, user_id)
-    with cache_lock:
-        if cache_key in user_profession_cache:
-            return user_profession_cache[cache_key]
+    hit, profession = cache_manager.get_cached_value("user_profession_cache", cache_key)
+    if hit:
+        return profession
     
     init_profession_db()
     conn = db_pool.get_connection()
@@ -204,8 +166,7 @@ def get_user_profession(group_id: int, user_id: int) -> int:
         profession = result[0]
     
     # 更新缓存
-    with cache_lock:
-        user_profession_cache[cache_key] = profession
+    cache_manager.set_cached_value("user_profession_cache", cache_key, profession)
     
     cursor.close()
     db_pool.return_connection(conn)
@@ -335,9 +296,8 @@ def change_profession(group_id: int, user_id: int, new_profession: int) -> str:
     
     # 清除缓存
     cache_key = (group_id, user_id)
-    with cache_lock:
-        if cache_key in user_profession_cache:
-            del user_profession_cache[cache_key]
+    # 直接清除整个缓存，因为缓存管理器会自动处理过期
+    cache_manager.clear_cache("user_profession_cache")
     
     # 如果从牛马职业切换出来，结束打工状态
     if current_profession == PROF_WORKER:
@@ -357,9 +317,9 @@ def get_special_resource(group_id: int, user_id: int, resource_type: int) -> int
     """获取特殊资源数量"""
     # 先检查缓存
     cache_key = (group_id, user_id, resource_type)
-    with cache_lock:
-        if cache_key in special_resource_cache:
-            return special_resource_cache[cache_key]
+    hit, amount = cache_manager.get_cached_value("special_resource_cache", cache_key)
+    if hit:
+        return amount
     
     init_profession_db()
     conn = db_pool.get_connection()
@@ -379,8 +339,7 @@ def get_special_resource(group_id: int, user_id: int, resource_type: int) -> int
         amount = result[0]
     
     # 更新缓存
-    with cache_lock:
-        special_resource_cache[cache_key] = amount
+    cache_manager.set_cached_value("special_resource_cache", cache_key, amount)
     
     cursor.close()
     db_pool.return_connection(conn)
@@ -393,8 +352,7 @@ def update_special_resource(group_id: int, user_id: int, resource_type: int, amo
     
     # 更新缓存
     cache_key = (group_id, user_id, resource_type)
-    with cache_lock:
-        special_resource_cache[cache_key] = amount
+    cache_manager.set_cached_value("special_resource_cache", cache_key, amount)
     
     init_profession_db()
     conn = db_pool.get_connection()
@@ -420,9 +378,9 @@ def get_tool_durability(group_id: int, user_id: int, tool_type: int, tool_catego
     """获取工具耐久度"""
     # 先检查缓存
     cache_key = (group_id, user_id, tool_type, tool_category)
-    with cache_lock:
-        if cache_key in tool_durability_cache:
-            return tool_durability_cache[cache_key]
+    hit, durability = cache_manager.get_cached_value("tool_durability_cache", cache_key)
+    if hit:
+        return durability
     
     init_profession_db()
     conn = db_pool.get_connection()
@@ -439,8 +397,7 @@ def get_tool_durability(group_id: int, user_id: int, tool_type: int, tool_catego
         durability = result[0]
     
     # 更新缓存
-    with cache_lock:
-        tool_durability_cache[cache_key] = durability
+    cache_manager.set_cached_value("tool_durability_cache", cache_key, durability)
     
     cursor.close()
     db_pool.return_connection(conn)
@@ -454,8 +411,7 @@ def update_tool_durability(group_id: int, user_id: int, tool_type: int, tool_cat
     
     # 更新缓存
     cache_key = (group_id, user_id, tool_type, tool_category)
-    with cache_lock:
-        tool_durability_cache[cache_key] = durability
+    cache_manager.set_cached_value("tool_durability_cache", cache_key, durability)
     
     init_profession_db()
     conn = db_pool.get_connection()
