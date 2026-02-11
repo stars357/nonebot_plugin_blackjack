@@ -13,6 +13,8 @@ cache_lock = threading.Lock()
 class CacheManager:
     def __init__(self):
         self.caches = {}
+        # 缓存内存上限（每个缓存的最大键值对数量）
+        self.cache_size_limit = 1000  # 默认每个缓存最多1000个项
     
     def get_cache(self, cache_name: str) -> Dict:
         """获取指定名称的缓存字典"""
@@ -50,7 +52,24 @@ class CacheManager:
         """设置缓存值"""
         with cache_lock:
             cache = self.get_cache(cache_name)
+            # 检查是否超过内存上限
+            if len(cache) >= self.cache_size_limit and key not in cache:
+                # 删除最旧的缓存项
+                oldest_key = min(cache, key=lambda k: cache[k][1])
+                del cache[oldest_key]
+            # 设置新缓存值
             cache[key] = (value, time.time())
+    
+    def set_cache_size_limit(self, limit: int) -> None:
+        """设置缓存大小上限"""
+        with cache_lock:
+            self.cache_size_limit = limit
+            # 对所有现有缓存应用新限制
+            for cache_name in self.caches:
+                cache = self.caches[cache_name]
+                while len(cache) > limit:
+                    oldest_key = min(cache, key=lambda k: cache[k][1])
+                    del cache[oldest_key]
 
 # 创建全局缓存管理器
 cache_manager = CacheManager()
