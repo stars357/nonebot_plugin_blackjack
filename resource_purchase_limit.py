@@ -33,7 +33,7 @@ def init_purchase_limit_db():
         conn.commit()
     finally:
         if conn:
-            conn.close()
+            db_pool.return_connection(conn)
 
 def get_daily_purchases(group_id: int, user_id: int, resource_type: int) -> int:
     """获取用户今日购买资源数量"""
@@ -68,7 +68,7 @@ def get_daily_purchases(group_id: int, user_id: int, resource_type: int) -> int:
         return amount
     finally:
         if conn:
-            conn.close()
+            db_pool.return_connection(conn)
 
 def update_daily_purchases(group_id: int, user_id: int, resource_type: int, amount: int) -> None:
     """更新用户今日购买资源数量"""
@@ -98,7 +98,7 @@ def update_daily_purchases(group_id: int, user_id: int, resource_type: int, amou
         conn.commit()
     finally:
         if conn:
-            conn.close()
+            db_pool.return_connection(conn)
     
     # 更新内存记录
     user_daily_purchases[(group_id, user_id, resource_type, today)] = amount
