@@ -47,3 +47,118 @@ class DatabasePool:
 
 # 创建全局数据库连接池
 db_pool = DatabasePool()
+
+class DatabaseTool:
+    """数据库操作工具类，提供简化的数据库操作方法"""
+    
+    @staticmethod
+    def execute_query(sql, params=None):
+        """
+        执行查询SQL语句
+        
+        Args:
+            sql: SQL查询语句
+            params: SQL参数（可选）
+            
+        Returns:
+            查询结果列表
+        """
+        conn = db_pool.get_connection()
+        try:
+            cursor = conn.cursor()
+            if params:
+                cursor.execute(sql, params)
+            else:
+                cursor.execute(sql)
+            result = cursor.fetchall()
+            return result
+        finally:
+            db_pool.return_connection(conn)
+    
+    @staticmethod
+    def execute_one(sql, params=None):
+        """
+        执行查询SQL语句，返回第一条结果
+        
+        Args:
+            sql: SQL查询语句
+            params: SQL参数（可选）
+            
+        Returns:
+            查询结果的第一条记录，或None
+        """
+        conn = db_pool.get_connection()
+        try:
+            cursor = conn.cursor()
+            if params:
+                cursor.execute(sql, params)
+            else:
+                cursor.execute(sql)
+            result = cursor.fetchone()
+            return result
+        finally:
+            db_pool.return_connection(conn)
+    
+    @staticmethod
+    def execute_update(sql, params=None):
+        """
+        执行更新SQL语句（INSERT、UPDATE、DELETE等）
+        
+        Args:
+            sql: SQL更新语句
+            params: SQL参数（可选）
+            
+        Returns:
+            受影响的行数
+        """
+        conn = db_pool.get_connection()
+        try:
+            cursor = conn.cursor()
+            if params:
+                cursor.execute(sql, params)
+            else:
+                cursor.execute(sql)
+            conn.commit()
+            return cursor.rowcount
+        finally:
+            db_pool.return_connection(conn)
+    
+    @staticmethod
+    def execute_many(sql, params_list):
+        """
+        批量执行SQL语句
+        
+        Args:
+            sql: SQL语句
+            params_list: 参数列表
+            
+        Returns:
+            受影响的行数
+        """
+        conn = db_pool.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.executemany(sql, params_list)
+            conn.commit()
+            return cursor.rowcount
+        finally:
+            db_pool.return_connection(conn)
+    
+    @staticmethod
+    def execute_script(sql_script):
+        """
+        执行SQL脚本
+        
+        Args:
+            sql_script: SQL脚本内容
+        """
+        conn = db_pool.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.executescript(sql_script)
+            conn.commit()
+        finally:
+            db_pool.return_connection(conn)
+
+# 创建全局数据库工具实例
+db_tool = DatabaseTool()
